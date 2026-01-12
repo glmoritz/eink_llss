@@ -8,7 +8,7 @@ It manages authentication, frame storage, diffing, and device orchestration.
 
 from fastapi import FastAPI
 
-from app.routers import devices_router, instances_router
+from app.routers import debug_router, devices_router, instances_router
 
 app = FastAPI(
     title="Low Level Screen Service (LLSS) API",
@@ -22,6 +22,7 @@ It manages authentication, frame storage, diffing, and device orchestration.
 )
 
 # Include routers
+app.include_router(debug_router)
 app.include_router(devices_router)
 app.include_router(instances_router)
 
