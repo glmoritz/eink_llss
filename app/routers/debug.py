@@ -7,10 +7,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Request, UploadFile, File, Form
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response
+from sqlalchemy.orm import Session
 
-from app.store import device_store, frame_store, instance_store, device_instance_map
+from app.database import get_db
+from app.db_models import Device, DeviceInstanceMap, Frame, Instance
 
 router = APIRouter(prefix="/debug", tags=["Debug"])
 
@@ -872,58 +874,70 @@ async def debug_emulator(request: Request) -> HTMLResponse:
 
 
 @router.get("/devices")
-async def list_devices() -> list:
+async def list_devices(db: Session = Depends(get_db)) -> list:
     """
     List all registered devices for the debug emulator.
     """
-    return list(device_store.values())
+    devices = db.query(Device).all()
+    return [device.to_dict() for device in devices]
 
 
 @router.get("/devices/{device_id}/frame")
-async def get_device_current_frame(device_id: str):
+async def get_device_current_frame(
+    device_id: str,
+    db: Session = Depends(get_db),
+):
     """
     Get the current frame for a device (for the emulator).
     """
-    device = device_store.get(device_id)
+    device = db.query(Device).filter(Device.device_id == device_id).first()
     if not device:
         return Response(content=b"", media_type="application/octet-stream")
 
-    current_frame_id = device.get("current_frame_id")
+    current_frame_id = device.current_frame_id
     if not current_frame_id:
         return Response(content=b"", media_type="application/octet-stream")
 
-    frame_data = frame_store.get(current_frame_id)
-    if not frame_data:
+    frame = db.query(Frame).filter(Frame.frame_id == current_frame_id).first()
+    if not frame or not frame.data:
         return Response(content=b"", media_type="application/octet-stream")
 
-    return Response(content=frame_data, media_type="image/png")
+    return Response(content=frame.data, media_type="image/png")
 
 
 @router.post("/devices/{device_id}/test-frame")
 async def upload_test_frame(
     device_id: str,
     file: UploadFile = File(...),
+    db: Session = Depends(get_db),
 ):
     """
     Upload a test frame directly to a device (for testing).
     """
-    device = device_store.get(device_id)
+    device = db.query(Device).filter(Device.device_id == device_id).first()
     if not device:
         return {"error": "Device not found"}
 
     content = await file.read()
 
     # Generate frame ID
-    frame_id = f"frame_{uuid.uuid4().hex[:12]}"
+    frame_id = uuid.uuid4()
+    frame_hash = hashlib.sha256(content).hexdigest()[:16]
 
-    # Store the frame
-    frame_store[frame_id] = content
+    # Store the frame in database
+    frame = Frame(
+        frame_id=frame_id,
+        data=content,
+        hash=frame_hash,
+    )
+    db.add(frame)
 
     # Update device
-    device["current_frame_id"] = frame_id
+    device.current_frame_id = frame_id
+    db.commit()
 
     return {
-        "frame_id": frame_id,
+        "frame_id": str(frame_id),
         "size": len(content),
         "message": "Test frame uploaded successfully",
     }
@@ -933,16 +947,36 @@ async def upload_test_frame(
 async def link_device_to_instance(
     device_id: str,
     instance_id: str = Form(...),
+    db: Session = Depends(get_db),
 ):
     """
     Link a device to an instance (for testing).
     """
-    device = device_store.get(device_id)
+    device = db.query(Device).filter(Device.device_id == device_id).first()
     if not device:
         return {"error": "Device not found"}
 
-    device["active_instance_id"] = instance_id
-    device_instance_map[device_id] = instance_id
+    # Update device's active instance
+    device.active_instance_id = instance_id
+
+    # Also add to mapping table
+    existing_map = (
+        db.query(DeviceInstanceMap)
+        .filter(
+            DeviceInstanceMap.device_id == device_id,
+            DeviceInstanceMap.instance_id == instance_id,
+        )
+        .first()
+    )
+
+    if not existing_map:
+        mapping = DeviceInstanceMap(
+            device_id=device_id,
+            instance_id=instance_id,
+        )
+        db.add(mapping)
+
+    db.commit()
 
     return {
         "device_id": device_id,
@@ -952,8 +986,9 @@ async def link_device_to_instance(
 
 
 @router.get("/instances")
-async def list_instances():
+async def list_instances(db: Session = Depends(get_db)):
     """
     List all instances (for the debug interface).
     """
-    return list(instance_store.values())
+    instances = db.query(Instance).all()
+    return [inst.to_dict() for inst in instances]

@@ -3,11 +3,15 @@ Instance routes - HLSS instances managed by LLSS
 """
 
 import hashlib
+import secrets
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, UploadFile
+from sqlalchemy.orm import Session
 
+from app.database import get_db
+from app.db_models import Device, Frame, Instance as InstanceModel
 from app.dependencies import get_current_instance
 from app.models import (
     FrameCreateResponse,
@@ -15,30 +19,39 @@ from app.models import (
     Instance,
     InstanceCreate,
 )
-from app.store import device_instance_map, device_store, frame_store, instance_store
 
 router = APIRouter(prefix="/instances", tags=["Instances"])
 
 
 @router.post("", response_model=Instance, status_code=201)
-async def create_instance(instance: InstanceCreate) -> Instance:
+async def create_instance(
+    instance: InstanceCreate,
+    db: Session = Depends(get_db),
+) -> Instance:
     """
     Create a new HLSS instance.
 
     Creates a new logical HLSS instance (e.g. a chess game or HA dashboard).
     """
-    instance_id = f"inst_{uuid.uuid4().hex[:12]}"
+    instance_id = uuid.uuid4()
+    access_token = secrets.token_urlsafe(32)
     created_at = datetime.now(timezone.utc)
 
-    instance_store[instance_id] = {
-        "instance_id": instance_id,
-        "name": instance.name,
-        "type": instance.type,
-        "created_at": created_at,
-    }
+    # Create instance in database
+    db_instance = InstanceModel(
+        instance_id=instance_id,
+        name=instance.name,
+        type=instance.type,
+        access_token=access_token,
+        created_at=created_at,
+    )
+
+    db.add(db_instance)
+    db.commit()
+    db.refresh(db_instance)
 
     return Instance(
-        instance_id=instance_id,
+        instance_id=str(instance_id),
         name=instance.name,
         type=instance.type,
         created_at=created_at,
@@ -52,6 +65,7 @@ async def submit_frame(
     instance_id: str,
     file: UploadFile,
     _: str = Depends(get_current_instance),
+    db: Session = Depends(get_db),
 ) -> FrameCreateResponse:
     """
     Submit a new logical frame.
@@ -62,26 +76,29 @@ async def submit_frame(
     content = await file.read()
 
     # Generate frame ID and hash
-    frame_id = f"frame_{uuid.uuid4().hex[:12]}"
+    frame_id = uuid.uuid4()
     frame_hash = hashlib.sha256(content).hexdigest()[:16]
     created_at = datetime.now(timezone.utc)
 
-    # Store the frame
-    frame_store[frame_id] = content
+    # Store the frame in database
+    frame = Frame(
+        frame_id=frame_id,
+        instance_id=instance_id,
+        data=content,
+        hash=frame_hash,
+        created_at=created_at,
+    )
+    db.add(frame)
 
-    # Update all devices linked to this instance
-    for device_id, linked_instance_id in device_instance_map.items():
-        if linked_instance_id == instance_id:
-            if device_id in device_store:
-                device_store[device_id]["current_frame_id"] = frame_id
+    # Update all devices that have this instance as active
+    devices = db.query(Device).filter(Device.active_instance_id == instance_id).all()
+    for device in devices:
+        device.current_frame_id = frame_id
 
-    # Also update any device that has this as active_instance_id
-    for device_id, device in device_store.items():
-        if device.get("active_instance_id") == instance_id:
-            device["current_frame_id"] = frame_id
+    db.commit()
 
     return FrameCreateResponse(
-        frame_id=frame_id,
+        frame_id=str(frame_id),
         hash=frame_hash,
         created_at=created_at,
     )
