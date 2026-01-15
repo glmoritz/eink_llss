@@ -12,11 +12,11 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
+from database import init_db
+from routers import debug_router, devices_router, instances_router
+
 # Load environment variables
 load_dotenv()
-
-from app.database import init_db
-from app.routers import debug_router, devices_router, instances_router
 
 
 @asynccontextmanager
@@ -59,4 +59,4 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     debug = os.getenv("DEBUG", "true").lower() == "true"
 
-    uvicorn.run("app.main:app", host=host, port=port, reload=debug)
+    uvicorn.run("main:app", host=host, port=port, reload=debug)

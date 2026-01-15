@@ -13,10 +13,16 @@
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
+-- Create schema
+CREATE SCHEMA IF NOT EXISTS eink_llss;
+
+-- Set search path to use eink_llss schema
+SET search_path TO eink_llss;
+
 -- Devices table
 CREATE TABLE IF NOT EXISTS devices (
     id SERIAL PRIMARY KEY,
-    device_id UUID UNIQUE NOT NULL DEFAULT uuid_generate_v4(),
+    device_id VARCHAR(50) UNIQUE NOT NULL,
     device_secret VARCHAR(64) NOT NULL,
     access_token VARCHAR(64) NOT NULL,
     hardware_id VARCHAR(100) NOT NULL,
@@ -29,8 +35,8 @@ CREATE TABLE IF NOT EXISTS devices (
     display_partial_refresh BOOLEAN NOT NULL DEFAULT FALSE,
     
     -- Current state
-    current_frame_id UUID,
-    active_instance_id UUID,
+    current_frame_id VARCHAR(50),
+    active_instance_id VARCHAR(50),
     
     -- Timestamps
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -44,7 +50,7 @@ CREATE TABLE IF NOT EXISTS devices (
 -- Instances table
 CREATE TABLE IF NOT EXISTS instances (
     id SERIAL PRIMARY KEY,
-    instance_id UUID UNIQUE NOT NULL DEFAULT uuid_generate_v4(),
+    instance_id VARCHAR(50) UNIQUE NOT NULL,
     name VARCHAR(255) NOT NULL,
     type VARCHAR(100) NOT NULL,
     
@@ -59,8 +65,8 @@ CREATE TABLE IF NOT EXISTS instances (
 -- Frames table
 CREATE TABLE IF NOT EXISTS frames (
     id SERIAL PRIMARY KEY,
-    frame_id UUID UNIQUE NOT NULL DEFAULT uuid_generate_v4(),
-    instance_id UUID,
+    frame_id VARCHAR(50) UNIQUE NOT NULL,
+    instance_id VARCHAR(50),
     
     -- Frame data
     data BYTEA NOT NULL,
@@ -83,8 +89,8 @@ CREATE TABLE IF NOT EXISTS frames (
 -- Device-Instance mapping table
 CREATE TABLE IF NOT EXISTS device_instance_map (
     id SERIAL PRIMARY KEY,
-    device_id UUID NOT NULL,
-    instance_id UUID NOT NULL,
+    device_id VARCHAR(50) NOT NULL,
+    instance_id VARCHAR(50) NOT NULL,
     
     -- Timestamps
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -106,8 +112,8 @@ CREATE TABLE IF NOT EXISTS device_instance_map (
 -- Input events table (for logging/debugging)
 CREATE TABLE IF NOT EXISTS input_events (
     id SERIAL PRIMARY KEY,
-    device_id UUID NOT NULL,
-    instance_id UUID,
+    device_id VARCHAR(50) NOT NULL,
+    instance_id VARCHAR(50),
     
     -- Event data
     button VARCHAR(20) NOT NULL,
@@ -158,6 +164,10 @@ CREATE TRIGGER update_instances_updated_at
     EXECUTE FUNCTION update_updated_at_column();
 
 -- Grant permissions to eink_root
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO eink_root;
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO eink_root;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO eink_root;
+GRANT USAGE ON SCHEMA eink_llss TO eink_root;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA eink_llss TO eink_root;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA eink_llss TO eink_root;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA eink_llss TO eink_root;
+
+-- Set default search path for the user
+ALTER USER eink_root SET search_path TO eink_llss;

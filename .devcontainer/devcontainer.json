@@ -21,8 +21,8 @@
       }
     }
   },
-  "postCreateCommand": "pip install -r requirements.txt",
-  "forwardPorts": [8000],
+  "postCreateCommand": "pip install -r requirements.txt",  
+  "appPort": [8008],
   "portsAttributes": {
     "8000": {
       "label": "FastAPI",

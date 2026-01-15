@@ -17,13 +17,17 @@ DATABASE_URL = os.getenv(
     "DATABASE_URL", "postgresql://eink_root:eink123@localhost:5432/eink_llss"
 )
 
-# Create engine
+# Schema name
+SCHEMA = "eink_llss"
+
+# Create engine with schema in search_path
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,  # Verify connections before using
     pool_size=10,
     max_overflow=20,
     echo=os.getenv("DEBUG", "false").lower() == "true",
+    connect_args={"options": f"-csearch_path={SCHEMA}"},
 )
 
 # Session factory
