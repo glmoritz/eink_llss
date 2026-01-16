@@ -47,6 +47,28 @@ CREATE TABLE IF NOT EXISTS devices (
     CONSTRAINT uk_hardware_id UNIQUE (hardware_id)
 );
 
+-- HLSS Types table (registry of available HLSS backends)
+CREATE TABLE IF NOT EXISTS hlss_types (
+    id SERIAL PRIMARY KEY,
+    type_id VARCHAR(50) UNIQUE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    base_url VARCHAR(500) NOT NULL,
+    auth_token VARCHAR(255),
+    
+    -- Display defaults
+    default_width INTEGER,
+    default_height INTEGER,
+    default_bit_depth INTEGER,
+    
+    -- Status
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    
+    -- Timestamps
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Instances table
 CREATE TABLE IF NOT EXISTS instances (
     id SERIAL PRIMARY KEY,
@@ -57,9 +79,30 @@ CREATE TABLE IF NOT EXISTS instances (
     -- Authentication
     access_token VARCHAR(64),
     
+    -- HLSS type reference
+    hlss_type_id VARCHAR(50),
+    
+    -- HLSS initialization state
+    hlss_initialized BOOLEAN NOT NULL DEFAULT FALSE,
+    hlss_ready BOOLEAN NOT NULL DEFAULT FALSE,
+    needs_configuration BOOLEAN NOT NULL DEFAULT FALSE,
+    configuration_url VARCHAR(500),
+    
+    -- Display configuration
+    display_width INTEGER,
+    display_height INTEGER,
+    display_bit_depth INTEGER,
+    
     -- Timestamps
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    initialized_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Foreign key
+    CONSTRAINT fk_hlss_type
+        FOREIGN KEY (hlss_type_id)
+        REFERENCES hlss_types(type_id)
+        ON DELETE SET NULL
 );
 
 -- Frames table
@@ -133,7 +176,9 @@ CREATE TABLE IF NOT EXISTS input_events (
 -- Indexes for better query performance
 CREATE INDEX IF NOT EXISTS idx_devices_hardware_id ON devices(hardware_id);
 CREATE INDEX IF NOT EXISTS idx_devices_access_token ON devices(access_token);
+CREATE INDEX IF NOT EXISTS idx_hlss_types_type_id ON hlss_types(type_id);
 CREATE INDEX IF NOT EXISTS idx_instances_access_token ON instances(access_token);
+CREATE INDEX IF NOT EXISTS idx_instances_hlss_type_id ON instances(hlss_type_id);
 CREATE INDEX IF NOT EXISTS idx_frames_instance_id ON frames(instance_id);
 CREATE INDEX IF NOT EXISTS idx_frames_created_at ON frames(created_at);
 CREATE INDEX IF NOT EXISTS idx_device_instance_map_device ON device_instance_map(device_id);

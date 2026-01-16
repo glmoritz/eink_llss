@@ -33,28 +33,68 @@ logger = logging.getLogger(__name__)
 class HLSSService:
     """Service for communicating with HLSS backends."""
 
-    def __init__(self, base_url: str, timeout: float = 30.0):
+    def __init__(
+        self,
+        llss_base_url: str,
+        hlss_base_url: str,
+        auth_token: Optional[str] = None,
+        timeout: float = 30.0,
+    ):
         """
         Initialize the HLSS service.
 
         Args:
-            base_url: The base URL of the LLSS API (for constructing callbacks).
+            llss_base_url: The base URL of the LLSS API (for constructing callbacks).
+            hlss_base_url: The base URL of the HLSS backend.
+            auth_token: Optional auth token for HLSS API.
             timeout: Request timeout in seconds.
         """
-        self.base_url = base_url.rstrip("/")
+        self.llss_base_url = llss_base_url.rstrip("/")
+        self.hlss_base_url = hlss_base_url.rstrip("/")
+        self.auth_token = auth_token
         self.timeout = timeout
+
+    @classmethod
+    def from_hlss_type(
+        cls,
+        hlss_type: HLSSType,
+        llss_base_url: str,
+        timeout: float = 30.0,
+    ) -> "HLSSService":
+        """
+        Create an HLSSService from an HLSSType database model.
+
+        Args:
+            hlss_type: The HLSS type configuration from database.
+            llss_base_url: The base URL of the LLSS API.
+            timeout: Request timeout in seconds.
+        """
+        return cls(
+            llss_base_url=llss_base_url,
+            hlss_base_url=str(hlss_type.base_url),
+            auth_token=str(hlss_type.auth_token) if hlss_type.auth_token else None,
+            timeout=timeout,
+        )
 
     def _get_callbacks(self, instance_id: str) -> HLSSCallbacks:
         """Generate callback URLs for an instance."""
         return HLSSCallbacks(
-            frames=f"{self.base_url}/instances/{instance_id}/frames",
-            inputs=f"{self.base_url}/instances/{instance_id}/inputs",
-            notify=f"{self.base_url}/instances/{instance_id}/notify",
+            frames=f"{self.llss_base_url}/instances/{instance_id}/frames",
+            inputs=f"{self.llss_base_url}/instances/{instance_id}/inputs",
+            notify=f"{self.llss_base_url}/instances/{instance_id}/notify",
         )
+
+    def _get_headers(self, content_type: bool = False) -> dict:
+        """Get common headers for HLSS requests."""
+        headers = {}
+        if content_type:
+            headers["Content-Type"] = "application/json"
+        if self.auth_token:
+            headers["Authorization"] = f"Bearer {self.auth_token}"
+        return headers
 
     async def initialize_instance(
         self,
-        hlss_type: HLSSType,
         instance: Instance,
         display: DisplayCapabilities,
     ) -> Tuple[bool, Optional[str], Optional[str]]:
@@ -65,14 +105,13 @@ class HLSSService:
         provide callback URLs.
 
         Args:
-            hlss_type: The HLSS type configuration.
             instance: The instance to initialize.
             display: Display capabilities for the instance.
 
         Returns:
             Tuple of (success, configuration_url, error_message)
         """
-        init_url = f"{hlss_type.base_url.rstrip('/')}/instances/init"
+        init_url = f"{self.hlss_base_url}/instances/init"
         callbacks = self._get_callbacks(instance.instance_id)
 
         request_data = HLSSInitRequest(
@@ -81,9 +120,7 @@ class HLSSService:
             display=display,
         )
 
-        headers = {"Content-Type": "application/json"}
-        if hlss_type.auth_token:
-            headers["Authorization"] = f"Bearer {hlss_type.auth_token}"
+        headers = self._get_headers(content_type=True)
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -129,24 +166,19 @@ class HLSSService:
 
     async def delete_instance(
         self,
-        hlss_type: HLSSType,
         instance_id: str,
     ) -> Tuple[bool, Optional[str]]:
         """
         Notify HLSS that an instance is being deleted.
 
         Args:
-            hlss_type: The HLSS type configuration.
             instance_id: The instance ID to delete.
 
         Returns:
             Tuple of (success, error_message)
         """
-        delete_url = f"{hlss_type.base_url.rstrip('/')}/instances/{instance_id}"
-
-        headers = {}
-        if hlss_type.auth_token:
-            headers["Authorization"] = f"Bearer {hlss_type.auth_token}"
+        delete_url = f"{self.hlss_base_url}/instances/{instance_id}"
+        headers = self._get_headers()
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -169,24 +201,19 @@ class HLSSService:
 
     async def get_instance_status(
         self,
-        hlss_type: HLSSType,
         instance_id: str,
     ) -> Tuple[bool, Optional[HLSSStatusResponse], Optional[str]]:
         """
         Get the status of an instance from its HLSS backend.
 
         Args:
-            hlss_type: The HLSS type configuration.
             instance_id: The instance ID.
 
         Returns:
             Tuple of (success, status_response, error_message)
         """
-        status_url = f"{hlss_type.base_url.rstrip('/')}/instances/{instance_id}/status"
-
-        headers = {}
-        if hlss_type.auth_token:
-            headers["Authorization"] = f"Bearer {hlss_type.auth_token}"
+        status_url = f"{self.hlss_base_url}/instances/{instance_id}/status"
+        headers = self._get_headers()
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -207,24 +234,19 @@ class HLSSService:
 
     async def get_frame_metadata(
         self,
-        hlss_type: HLSSType,
         instance_id: str,
     ) -> Tuple[bool, Optional[HLSSFrameMetadata], Optional[str]]:
         """
         Get frame metadata from HLSS to check if there's a newer frame.
 
         Args:
-            hlss_type: The HLSS type configuration.
             instance_id: The instance ID.
 
         Returns:
             Tuple of (success, frame_metadata, error_message)
         """
-        frame_url = f"{hlss_type.base_url.rstrip('/')}/instances/{instance_id}/frame"
-
-        headers = {}
-        if hlss_type.auth_token:
-            headers["Authorization"] = f"Bearer {hlss_type.auth_token}"
+        frame_url = f"{self.hlss_base_url}/instances/{instance_id}/frame"
+        headers = self._get_headers()
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -251,26 +273,19 @@ class HLSSService:
 
     async def request_frame_send(
         self,
-        hlss_type: HLSSType,
         instance_id: str,
     ) -> Tuple[bool, Optional[HLSSFrameSendResponse], Optional[str]]:
         """
         Request HLSS to send (or re-send) the current frame.
 
         Args:
-            hlss_type: The HLSS type configuration.
             instance_id: The instance ID.
 
         Returns:
             Tuple of (success, send_response, error_message)
         """
-        send_url = (
-            f"{hlss_type.base_url.rstrip('/')}/instances/{instance_id}/frame/send"
-        )
-
-        headers = {"Content-Type": "application/json"}
-        if hlss_type.auth_token:
-            headers["Authorization"] = f"Bearer {hlss_type.auth_token}"
+        send_url = f"{self.hlss_base_url}/instances/{instance_id}/frame/send"
+        headers = self._get_headers(content_type=True)
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -293,7 +308,6 @@ class HLSSService:
 
     async def forward_input(
         self,
-        hlss_type: HLSSType,
         instance_id: str,
         event: InputEvent,
     ) -> Tuple[bool, Optional[str]]:
@@ -301,18 +315,14 @@ class HLSSService:
         Forward an input event to an HLSS instance.
 
         Args:
-            hlss_type: The HLSS type configuration.
             instance_id: The instance ID.
             event: The input event.
 
         Returns:
             Tuple of (success, error_message)
         """
-        input_url = f"{hlss_type.base_url.rstrip('/')}/instances/{instance_id}/inputs"
-
-        headers = {"Content-Type": "application/json"}
-        if hlss_type.auth_token:
-            headers["Authorization"] = f"Bearer {hlss_type.auth_token}"
+        input_url = f"{self.hlss_base_url}/instances/{instance_id}/inputs"
+        headers = self._get_headers(content_type=True)
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -336,24 +346,19 @@ class HLSSService:
 
     async def trigger_render(
         self,
-        hlss_type: HLSSType,
         instance_id: str,
     ) -> Tuple[bool, Optional[str]]:
         """
         Trigger a render for an HLSS instance.
 
         Args:
-            hlss_type: The HLSS type configuration.
             instance_id: The instance ID.
 
         Returns:
             Tuple of (success, error_message)
         """
-        render_url = f"{hlss_type.base_url.rstrip('/')}/instances/{instance_id}/render"
-
-        headers = {}
-        if hlss_type.auth_token:
-            headers["Authorization"] = f"Bearer {hlss_type.auth_token}"
+        render_url = f"{self.hlss_base_url}/instances/{instance_id}/render"
+        headers = self._get_headers()
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -398,9 +403,8 @@ async def initialize_hlss_instance(
         partial_refresh=False,
     )
 
-    service = HLSSService(llss_base_url)
+    service = HLSSService.from_hlss_type(hlss_type, llss_base_url)
     success, config_url, error = await service.initialize_instance(
-        hlss_type=hlss_type,
         instance=instance,
         display=display,
     )
@@ -438,9 +442,8 @@ async def refresh_hlss_status(
     Returns:
         Tuple of (success, error_message)
     """
-    service = HLSSService(llss_base_url)
+    service = HLSSService.from_hlss_type(hlss_type, llss_base_url)
     success, status, error = await service.get_instance_status(
-        hlss_type=hlss_type,
         instance_id=instance.instance_id,
     )
 

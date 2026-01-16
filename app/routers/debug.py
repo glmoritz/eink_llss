@@ -11,8 +11,8 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.db_models import Device, DeviceInstanceMap, Frame, Instance
+from database import get_db
+from db_models import Device, DeviceInstanceMap, Frame, Instance
 
 router = APIRouter(prefix="/debug", tags=["Debug"])
 
@@ -492,8 +492,33 @@ async def debug_emulator(request: Request) -> HTMLResponse:
     <script>
         const BASE_URL = '{base_url}';
         let currentDevice = null;
-        let currentToken = null;
+        let currentToken = null;  // JWT access token
+        let currentRefreshToken = null;  // JWT refresh token
+        let deviceSecret = null;  // Stored device secret for authentication
         let pollInterval = null;
+        
+        // Local storage keys
+        const STORAGE_PREFIX = 'llss_emulator_';
+        
+        function getStoredCredentials(deviceId) {{
+            try {{
+                const data = localStorage.getItem(STORAGE_PREFIX + deviceId);
+                return data ? JSON.parse(data) : null;
+            }} catch (e) {{
+                return null;
+            }}
+        }}
+        
+        function storeCredentials(deviceId, secret, refreshToken) {{
+            try {{
+                localStorage.setItem(STORAGE_PREFIX + deviceId, JSON.stringify({{
+                    device_secret: secret,
+                    refresh_token: refreshToken
+                }}));
+            }} catch (e) {{
+                console.error('Failed to store credentials:', e);
+            }}
+        }}
         
         // Button mappings
         const BUTTONS = {{
@@ -516,7 +541,9 @@ async def debug_emulator(request: Request) -> HTMLResponse:
                 devices.forEach(device => {{
                     const option = document.createElement('option');
                     option.value = device.device_id;
-                    option.textContent = `${{device.hardware_id}} (${{device.device_id}})`;
+                    const statusBadge = device.auth_status === 'authorized' ? '✅' : 
+                                       device.auth_status === 'pending' ? '⏳' : '❌';
+                    option.textContent = `${{statusBadge}} ${{device.hardware_id}} (${{device.device_id}})`;
                     option.dataset.device = JSON.stringify(device);
                     select.appendChild(option);
                 }});
@@ -541,7 +568,6 @@ async def debug_emulator(request: Request) -> HTMLResponse:
             }}
             
             currentDevice = JSON.parse(selectedOption.dataset.device);
-            currentToken = currentDevice.access_token;
             
             // Update device info
             document.getElementById('device-info').classList.remove('hidden');
@@ -551,14 +577,171 @@ async def debug_emulator(request: Request) -> HTMLResponse:
                 `${{currentDevice.display.width}}x${{currentDevice.display.height}} @ ${{currentDevice.display.bit_depth}}bpp`;
             document.getElementById('info-firmware').textContent = currentDevice.firmware_version;
             
-            showEmulator();
-            startPolling();
-            log('success', `Selected device: ${{currentDevice.hardware_id}}`);
+            // Check auth status
+            if (currentDevice.auth_status === 'pending') {{
+                log('warning', `Device is pending authorization. Please authorize via admin panel.`);
+                showEmulator();
+                return;
+            }}
+            
+            if (currentDevice.auth_status !== 'authorized') {{
+                log('error', `Device status: ${{currentDevice.auth_status}}. Cannot authenticate.`);
+                showEmulator();
+                return;
+            }}
+            
+            // Try to get tokens
+            authenticateDevice();
+        }}
+        
+        async function authenticateDevice() {{
+            if (!currentDevice) return;
+            
+            // Check for stored credentials
+            const stored = getStoredCredentials(currentDevice.device_id);
+            
+            if (stored && stored.refresh_token) {{
+                // Try to refresh the access token
+                log('info', 'Found stored credentials, refreshing access token...');
+                const success = await refreshAccessToken(stored.refresh_token);
+                if (success) {{
+                    currentRefreshToken = stored.refresh_token;
+                    showEmulator();
+                    log('success', `Authenticated device: ${{currentDevice.hardware_id}}`);
+                    return;
+                }}
+            }}
+            
+            // Need to get new refresh token - requires device_secret
+            if (stored && stored.device_secret) {{
+                deviceSecret = stored.device_secret;
+            }} else {{
+                // For the emulator, we'll use debug endpoint to get the device secret
+                log('warning', 'No stored credentials. Getting device secret from debug endpoint...');
+                const secretResp = await fetch(`${{BASE_URL}}/debug/devices/${{currentDevice.device_id}}/secret`);
+                if (secretResp.ok) {{
+                    const secretData = await secretResp.json();
+                    deviceSecret = secretData.device_secret;
+                }} else {{
+                    log('error', 'Could not get device secret. Device may need to be re-registered.');
+                    showEmulator();
+                    return;
+                }}
+            }}
+            
+            // Get refresh token using device secret
+            const authSuccess = await getRefreshToken();
+            if (authSuccess) {{
+                showEmulator();
+                log('success', `Authenticated device: ${{currentDevice.hardware_id}}`);
+            }} else {{
+                showEmulator();
+            }}
+        }}
+        
+        async function getRefreshToken() {{
+            if (!currentDevice || !deviceSecret) {{
+                log('error', 'Missing device or secret');
+                return false;
+            }}
+            
+            try {{
+                const authReq = {{
+                    hardware_id: currentDevice.hardware_id,
+                    device_secret: deviceSecret,
+                    firmware_version: currentDevice.firmware_version,
+                    display: currentDevice.display
+                }};
+                
+                const resp = await fetch(`${{BASE_URL}}/auth/devices/token`, {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify(authReq)
+                }});
+                
+                const data = await resp.json();
+                
+                if (data.auth_status === 'pending') {{
+                    log('warning', 'Device pending authorization');
+                    return false;
+                }}
+                
+                if (!resp.ok) {{
+                    log('error', `Auth failed: ${{data.detail || resp.status}}`);
+                    return false;
+                }}
+                
+                if (data.refresh_token) {{
+                    currentRefreshToken = data.refresh_token;
+                    storeCredentials(currentDevice.device_id, deviceSecret, data.refresh_token);
+                    
+                    // Now get access token
+                    return await refreshAccessToken(data.refresh_token);
+                }}
+                
+                return false;
+            }} catch (err) {{
+                log('error', `Auth error: ${{err.message}}`);
+                return false;
+            }}
+        }}
+        
+        async function refreshAccessToken(refreshToken) {{
+            try {{
+                const resp = await fetch(`${{BASE_URL}}/auth/devices/refresh`, {{
+                    method: 'POST',
+                    headers: {{
+                        'Authorization': `Bearer ${{refreshToken}}`
+                    }}
+                }});
+                
+                if (resp.status === 401) {{
+                    log('warning', 'Refresh token expired. Need to re-authenticate.');
+                    return false;
+                }}
+                
+                if (!resp.ok) {{
+                    log('error', `Token refresh failed: ${{resp.status}}`);
+                    return false;
+                }}
+                
+                const data = await resp.json();
+                currentToken = data.access_token;
+                log('info', `Access token obtained (expires in ${{Math.round(data.expires_in/3600)}}h)`);
+                return true;
+            }} catch (err) {{
+                log('error', `Token refresh error: ${{err.message}}`);
+                return false;
+            }}
+        }}
+        
+        async function apiCallWithRetry(url, options = {{}}) {{
+            // Add auth header
+            options.headers = options.headers || {{}};
+            if (currentToken) {{
+                options.headers['Authorization'] = `Bearer ${{currentToken}}`;
+            }}
+            
+            let resp = await fetch(url, options);
+            
+            // If 401, try to refresh token and retry
+            if (resp.status === 401 && currentRefreshToken) {{
+                log('info', 'Token expired, refreshing...');
+                const refreshed = await refreshAccessToken(currentRefreshToken);
+                if (refreshed) {{
+                    options.headers['Authorization'] = `Bearer ${{currentToken}}`;
+                    resp = await fetch(url, options);
+                }}
+            }}
+            
+            return resp;
         }}
         
         function showNoDevice() {{
             currentDevice = null;
             currentToken = null;
+            currentRefreshToken = null;
+            deviceSecret = null;
             stopPolling();
             
             document.getElementById('device-info').classList.add('hidden');
@@ -613,10 +796,61 @@ async def debug_emulator(request: Request) -> HTMLResponse:
                         <button onclick="uploadTestFrame()">Upload Frame</button>
                     </div>
                 </div>
+                
+                <div class="test-panel">
+                    <h3>�️ Frame Detector</h3>
+                    <div class="test-section">
+                        <button onclick="manualPollFrame()" style="padding:8px 16px;background:#27ae60;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:bold;">🔄 Check for Frame</button>
+                        <label style="margin-left:15px;">Auto-poll:</label>
+                        <input type="number" id="frame-poll-interval" value="2" min="1" max="60" style="width:60px;padding:8px;background:#2a2a4a;border:1px solid #444;border-radius:6px;color:#fff;text-align:center;">
+                        <label>sec</label>
+                        <button id="frame-poll-toggle" onclick="toggleFramePolling()" style="padding:8px 16px;background:#9b59b6;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:bold;">Start Auto</button>
+                    </div>
+                </div>
+                
+                <div class="test-panel">
+                    <h3>�🔄 HLSS Instance Status</h3>
+                    <div class="test-section">
+                        <label>Instance:</label>
+                        <select id="instance-select" style="flex:1;min-width:200px;padding:8px;background:#2a2a4a;border:1px solid #444;border-radius:6px;color:#fff;">
+                            <option value="">-- Select instance --</option>
+                        </select>
+                        <button onclick="loadInstances()" style="padding:8px 12px;background:#666;color:#fff;border:none;border-radius:6px;cursor:pointer;">🔄</button>
+                    </div>
+                    <div class="test-section" style="margin-top:10px;">
+                        <button onclick="refreshInstanceStatus()" style="padding:8px 16px;background:#27ae60;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:bold;">Force Refresh Status</button>
+                        <label style="margin-left:15px;">Auto-refresh:</label>
+                        <input type="number" id="auto-refresh-interval" value="5" min="1" max="300" style="width:60px;padding:8px;background:#2a2a4a;border:1px solid #444;border-radius:6px;color:#fff;text-align:center;">
+                        <label>sec</label>
+                        <button id="auto-refresh-toggle" onclick="toggleAutoRefresh()" style="padding:8px 16px;background:#9b59b6;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:bold;">Start Auto</button>
+                    </div>
+                    <div id="instance-status" class="device-info" style="margin-top:10px;display:none;">
+                        <div><strong>Instance:</strong> <span id="status-instance-name">-</span></div>
+                        <div><strong>Type:</strong> <span id="status-instance-type">-</span></div>
+                        <div><strong>Initialized:</strong> <span id="status-initialized">-</span></div>
+                        <div><strong>Ready:</strong> <span id="status-ready">-</span></div>
+                        <div><strong>Needs Config:</strong> <span id="status-needs-config">-</span></div>
+                        <div><strong>Config URL:</strong> <span id="status-config-url">-</span></div>
+                        <div><strong>Last Refresh:</strong> <span id="status-last-refresh">-</span></div>
+                    </div>
+                    <div class="test-section" style="margin-top:15px;padding-top:15px;border-top:1px solid #444;">
+                        <button onclick="checkFrameSync()" style="padding:8px 16px;background:#f39c12;color:#1a1a2e;border:none;border-radius:6px;cursor:pointer;font-weight:bold;">🔍 Check Frame Sync</button>
+                        <button onclick="syncFrame()" style="padding:8px 16px;background:#e74c3c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:bold;">📥 Sync Frame from HLSS</button>
+                    </div>
+                    <div id="frame-sync-status" class="device-info" style="margin-top:10px;display:none;">
+                        <div><strong>HLSS has frame:</strong> <span id="sync-hlss-has-frame">-</span></div>
+                        <div><strong>HLSS frame hash:</strong> <span id="sync-hlss-hash">-</span></div>
+                        <div><strong>LLSS has frame:</strong> <span id="sync-llss-has-frame">-</span></div>
+                        <div><strong>LLSS frame hash:</strong> <span id="sync-llss-hash">-</span></div>
+                        <div><strong>In Sync:</strong> <span id="sync-in-sync">-</span></div>
+                        <div><strong>Action:</strong> <span id="sync-action">-</span></div>
+                    </div>
+                </div>
             `;
             
-            // Fetch current frame
+            // Fetch current frame and load instances
             fetchFrame();
+            loadInstances();
         }}
         
         async function uploadTestFrame() {{
@@ -657,7 +891,7 @@ async def debug_emulator(request: Request) -> HTMLResponse:
         
         async function sendButton(button) {{
             if (!currentDevice || !currentToken) {{
-                log('error', 'No device selected');
+                log('error', 'No device selected or not authenticated');
                 return;
             }}
             
@@ -670,13 +904,12 @@ async def debug_emulator(request: Request) -> HTMLResponse:
             log('event', `Button pressed: ${{button}}`);
             
             try {{
-                const resp = await fetch(
+                const resp = await apiCallWithRetry(
                     `${{BASE_URL}}/devices/${{currentDevice.device_id}}/inputs`,
                     {{
                         method: 'POST',
                         headers: {{
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${{currentToken}}`
+                            'Content-Type': 'application/json'
                         }},
                         body: JSON.stringify(event)
                     }}
@@ -698,13 +931,8 @@ async def debug_emulator(request: Request) -> HTMLResponse:
             if (!currentDevice || !currentToken) return;
             
             try {{
-                const resp = await fetch(
-                    `${{BASE_URL}}/devices/${{currentDevice.device_id}}/state`,
-                    {{
-                        headers: {{
-                            'Authorization': `Bearer ${{currentToken}}`
-                        }}
-                    }}
+                const resp = await apiCallWithRetry(
+                    `${{BASE_URL}}/devices/${{currentDevice.device_id}}/state`
                 );
                 
                 if (resp.ok) {{
@@ -721,17 +949,12 @@ async def debug_emulator(request: Request) -> HTMLResponse:
         }}
         
         async function fetchFrame() {{
-            if (!currentDevice || !currentToken) return;
+            if (!currentDevice) return;
             
             try {{
-                // Try to get current frame from debug endpoint
+                // Try to get current frame from debug endpoint (no auth needed)
                 const resp = await fetch(
-                    `${{BASE_URL}}/debug/devices/${{currentDevice.device_id}}/frame`,
-                    {{
-                        headers: {{
-                            'Authorization': `Bearer ${{currentToken}}`
-                        }}
-                    }}
+                    `${{BASE_URL}}/debug/devices/${{currentDevice.device_id}}/frame`
                 );
                 
                 if (resp.ok) {{
@@ -751,13 +974,8 @@ async def debug_emulator(request: Request) -> HTMLResponse:
             if (!currentDevice || !currentToken) return;
             
             try {{
-                const resp = await fetch(
-                    `${{BASE_URL}}/devices/${{currentDevice.device_id}}/frames/${{frameId}}`,
-                    {{
-                        headers: {{
-                            'Authorization': `Bearer ${{currentToken}}`
-                        }}
-                    }}
+                const resp = await apiCallWithRetry(
+                    `${{BASE_URL}}/devices/${{currentDevice.device_id}}/frames/${{frameId}}`
                 );
                 
                 if (resp.ok) {{
@@ -773,9 +991,47 @@ async def debug_emulator(request: Request) -> HTMLResponse:
             }}
         }}
         
-        function startPolling() {{
+        // Frame Detector Functions
+        async function manualPollFrame() {{
+            if (!currentDevice) {{
+                log('error', 'No device selected');
+                return;
+            }}
+            log('info', 'Checking for new frame...');
+            if (currentToken) {{
+                await pollState();
+            }}
+            await fetchFrame();
+        }}
+        
+        function toggleFramePolling() {{
+            const btn = document.getElementById('frame-poll-toggle');
+            if (!btn) return;
+            
+            if (pollInterval) {{
+                stopPolling();
+                btn.textContent = 'Start Auto';
+                btn.style.background = '#9b59b6';
+                log('info', 'Frame auto-poll stopped');
+            }} else {{
+                const intervalInput = document.getElementById('frame-poll-interval');
+                const seconds = parseInt(intervalInput.value) || 2;
+                
+                if (seconds < 1 || seconds > 60) {{
+                    log('error', 'Interval must be between 1 and 60 seconds');
+                    return;
+                }}
+                
+                startPolling(seconds);
+                btn.textContent = 'Stop Auto';
+                btn.style.background = '#e74c3c';
+                log('info', `Frame auto-poll started: every ${{seconds}} seconds`);
+            }}
+        }}
+        
+        function startPolling(seconds = 2) {{
             stopPolling();
-            pollInterval = setInterval(pollState, 2000);
+            pollInterval = setInterval(pollState, seconds * 1000);
             pollState();
         }}
         
@@ -816,7 +1072,8 @@ async def debug_emulator(request: Request) -> HTMLResponse:
             }};
             
             try {{
-                const resp = await fetch(`${{BASE_URL}}/devices/register`, {{
+                // Use new auth endpoint for registration
+                const resp = await fetch(`${{BASE_URL}}/auth/devices/register`, {{
                     method: 'POST',
                     headers: {{
                         'Content-Type': 'application/json'
@@ -827,6 +1084,10 @@ async def debug_emulator(request: Request) -> HTMLResponse:
                 if (resp.ok) {{
                     const result = await resp.json();
                     log('success', `Device registered: ${{result.device_id}}`);
+                    log('info', `Status: ${{result.auth_status}} - ${{result.message}}`);
+                    
+                    // Store the device secret for later authentication
+                    storeCredentials(result.device_id, result.device_secret, null);
                     
                     // Clear form and close
                     document.getElementById('reg-hardware-id').value = '';
@@ -861,6 +1122,194 @@ async def debug_emulator(request: Request) -> HTMLResponse:
             }}
         }}
         
+        // HLSS Instance Status Functions
+        let instancesList = [];
+        let autoRefreshInterval = null;
+        
+        async function loadInstances() {{
+            try {{
+                const resp = await fetch(`${{BASE_URL}}/admin/instances`);
+                if (!resp.ok) throw new Error(`HTTP ${{resp.status}}`);
+                instancesList = await resp.json();
+                
+                const select = document.getElementById('instance-select');
+                if (!select) return;
+                
+                const currentValue = select.value;
+                select.innerHTML = '<option value="">-- Select instance --</option>';
+                
+                instancesList.forEach(inst => {{
+                    const option = document.createElement('option');
+                    option.value = inst.instance_id;
+                    option.textContent = `${{inst.name}} (${{inst.type}})`;
+                    select.appendChild(option);
+                }});
+                
+                if (currentValue && instancesList.some(i => i.instance_id === currentValue)) {{
+                    select.value = currentValue;
+                }}
+                
+                log('info', `Loaded ${{instancesList.length}} instance(s)`);
+            }} catch (err) {{
+                log('error', `Failed to load instances: ${{err.message}}`);
+            }}
+        }}
+        
+        async function refreshInstanceStatus() {{
+            const select = document.getElementById('instance-select');
+            if (!select || !select.value) {{
+                log('error', 'Please select an instance first');
+                return;
+            }}
+            
+            const instanceId = select.value;
+            log('info', `Refreshing status for instance: ${{instanceId}}`);
+            
+            try {{
+                const resp = await fetch(`${{BASE_URL}}/admin/instances/${{instanceId}}/refresh-status`, {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }}
+                }});
+                
+                if (!resp.ok) {{
+                    const error = await resp.json().catch(() => ({{ detail: `HTTP ${{resp.status}}` }}));
+                    throw new Error(error.detail || `HTTP ${{resp.status}}`);
+                }}
+                
+                const instance = await resp.json();
+                updateInstanceStatusDisplay(instance);
+                log('success', `Status refreshed: ready=${{instance.hlss_ready}}, needs_config=${{instance.needs_configuration}}`);
+            }} catch (err) {{
+                log('error', `Failed to refresh status: ${{err.message}}`);
+            }}
+        }}
+        
+        function updateInstanceStatusDisplay(instance) {{
+            const statusDiv = document.getElementById('instance-status');
+            if (!statusDiv) return;
+            
+            statusDiv.style.display = 'block';
+            document.getElementById('status-instance-name').textContent = instance.name;
+            document.getElementById('status-instance-type').textContent = instance.type || instance.hlss_type_id || '-';
+            document.getElementById('status-initialized').textContent = instance.hlss_initialized ? '✅ Yes' : '❌ No';
+            document.getElementById('status-ready').textContent = instance.hlss_ready ? '✅ Yes' : '❌ No';
+            document.getElementById('status-needs-config').textContent = instance.needs_configuration ? '⚠️ Yes' : '✅ No';
+            document.getElementById('status-config-url').innerHTML = instance.configuration_url 
+                ? `<a href="${{instance.configuration_url}}" target="_blank" style="color:#00d9ff;">${{instance.configuration_url}}</a>` 
+                : '-';
+            document.getElementById('status-last-refresh').textContent = new Date().toLocaleTimeString();
+        }}
+        
+        function toggleAutoRefresh() {{
+            const btn = document.getElementById('auto-refresh-toggle');
+            if (!btn) return;
+            
+            if (autoRefreshInterval) {{
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+                btn.textContent = 'Start Auto';
+                btn.style.background = '#9b59b6';
+                log('info', 'Auto-refresh stopped');
+            }} else {{
+                const intervalInput = document.getElementById('auto-refresh-interval');
+                const seconds = parseInt(intervalInput.value) || 5;
+                
+                if (seconds < 1 || seconds > 300) {{
+                    log('error', 'Interval must be between 1 and 300 seconds');
+                    return;
+                }}
+                
+                // Do an immediate refresh
+                refreshInstanceStatus();
+                
+                autoRefreshInterval = setInterval(refreshInstanceStatus, seconds * 1000);
+                btn.textContent = 'Stop Auto';
+                btn.style.background = '#e74c3c';
+                log('info', `Auto-refresh started: every ${{seconds}} seconds`);
+            }}
+        }}
+        
+        // Frame Sync Functions
+        async function checkFrameSync() {{
+            const select = document.getElementById('instance-select');
+            if (!select || !select.value) {{
+                log('error', 'Please select an instance first');
+                return;
+            }}
+            
+            const instanceId = select.value;
+            log('info', `Checking frame sync for instance: ${{instanceId}}`);
+            
+            try {{
+                const resp = await fetch(`${{BASE_URL}}/admin/instances/${{instanceId}}/frame-status`);
+                
+                if (!resp.ok) {{
+                    const error = await resp.json().catch(() => ({{ detail: `HTTP ${{resp.status}}` }}));
+                    throw new Error(error.detail || `HTTP ${{resp.status}}`);
+                }}
+                
+                const result = await resp.json();
+                updateFrameSyncDisplay(result);
+                
+                if (result.error) {{
+                    log('error', `Frame sync check: ${{result.error}}`);
+                }} else if (result.in_sync) {{
+                    log('success', 'Frames are in sync');
+                }} else {{
+                    log('event', 'Frames are OUT OF SYNC - click "Sync Frame from HLSS" to fix');
+                }}
+            }} catch (err) {{
+                log('error', `Failed to check frame sync: ${{err.message}}`);
+            }}
+        }}
+        
+        async function syncFrame() {{
+            const select = document.getElementById('instance-select');
+            if (!select || !select.value) {{
+                log('error', 'Please select an instance first');
+                return;
+            }}
+            
+            const instanceId = select.value;
+            log('info', `Requesting frame sync for instance: ${{instanceId}}`);
+            
+            try {{
+                const resp = await fetch(`${{BASE_URL}}/admin/instances/${{instanceId}}/sync-frame`, {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }}
+                }});
+                
+                if (!resp.ok) {{
+                    const error = await resp.json().catch(() => ({{ detail: `HTTP ${{resp.status}}` }}));
+                    throw new Error(error.detail || `HTTP ${{resp.status}}`);
+                }}
+                
+                const result = await resp.json();
+                updateFrameSyncDisplay(result);
+                
+                if (result.error) {{
+                    log('error', `Frame sync failed: ${{result.error}}`);
+                }} else if (result.action_taken) {{
+                    log('success', `Frame sync: ${{result.action_taken}}`);
+                }}
+            }} catch (err) {{
+                log('error', `Failed to sync frame: ${{err.message}}`);
+            }}
+        }}
+        
+        function updateFrameSyncDisplay(result) {{
+            const statusDiv = document.getElementById('frame-sync-status');
+            if (!statusDiv) return;
+            
+            statusDiv.style.display = 'block';
+            document.getElementById('sync-hlss-has-frame').textContent = result.hlss_has_frame ? '✅ Yes' : '❌ No';
+            document.getElementById('sync-hlss-hash').textContent = result.hlss_frame_hash || '-';
+            document.getElementById('sync-llss-has-frame').textContent = result.llss_has_frame ? '✅ Yes' : '❌ No';
+            document.getElementById('sync-llss-hash').textContent = result.llss_frame_hash || '-';
+            document.getElementById('sync-in-sync').textContent = result.in_sync ? '✅ Yes' : '❌ No';
+            document.getElementById('sync-action').textContent = result.action_taken || result.error || '-';
+        }}
+        
         // Event listeners
         document.getElementById('device-select').addEventListener('change', selectDevice);
         
@@ -880,6 +1329,28 @@ async def list_devices(db: Session = Depends(get_db)) -> list:
     """
     devices = db.query(Device).all()
     return [device.to_dict() for device in devices]
+
+
+@router.get("/devices/{device_id}/secret")
+async def get_device_secret(
+    device_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Get device secret for the emulator (DEBUG ONLY).
+
+    This endpoint should be disabled in production!
+    It allows the emulator to authenticate as a device.
+    """
+    device = db.query(Device).filter(Device.device_id == device_id).first()
+    if not device:
+        return {"error": "Device not found"}
+
+    return {
+        "device_id": device.device_id,
+        "device_secret": device.device_secret,
+        "auth_status": device.auth_status,
+    }
 
 
 @router.get("/devices/{device_id}/frame")
@@ -921,7 +1392,7 @@ async def upload_test_frame(
     content = await file.read()
 
     # Generate frame ID
-    frame_id = uuid.uuid4()
+    frame_id = f"frame_{uuid.uuid4().hex[:12]}"
     frame_hash = hashlib.sha256(content).hexdigest()[:16]
 
     # Store the frame in database
@@ -937,7 +1408,7 @@ async def upload_test_frame(
     db.commit()
 
     return {
-        "frame_id": str(frame_id),
+        "frame_id": frame_id,
         "size": len(content),
         "message": "Test frame uploaded successfully",
     }

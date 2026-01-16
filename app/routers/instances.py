@@ -10,10 +10,10 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, UploadFile
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.db_models import Device, Frame, Instance as InstanceModel
-from app.dependencies import get_current_instance
-from app.models import (
+from database import get_db
+from db_models import Device, Frame, Instance as InstanceModel
+from dependencies import get_current_instance
+from models import (
     FrameCreateResponse,
     InputEvent,
     Instance,
@@ -33,7 +33,7 @@ async def create_instance(
 
     Creates a new logical HLSS instance (e.g. a chess game or HA dashboard).
     """
-    instance_id = uuid.uuid4()
+    instance_id = f"inst_{uuid.uuid4().hex[:12]}"
     access_token = secrets.token_urlsafe(32)
     created_at = datetime.now(timezone.utc)
 
@@ -51,9 +51,10 @@ async def create_instance(
     db.refresh(db_instance)
 
     return Instance(
-        instance_id=str(instance_id),
+        instance_id=instance_id,
         name=instance.name,
         type=instance.type,
+        access_token=access_token,
         created_at=created_at,
     )
 
@@ -76,7 +77,7 @@ async def submit_frame(
     content = await file.read()
 
     # Generate frame ID and hash
-    frame_id = uuid.uuid4()
+    frame_id = f"frame_{uuid.uuid4().hex[:12]}"
     frame_hash = hashlib.sha256(content).hexdigest()[:16]
     created_at = datetime.now(timezone.utc)
 
@@ -98,7 +99,7 @@ async def submit_frame(
     db.commit()
 
     return FrameCreateResponse(
-        frame_id=str(frame_id),
+        frame_id=frame_id,
         hash=frame_hash,
         created_at=created_at,
     )

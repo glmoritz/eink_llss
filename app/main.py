@@ -13,7 +13,13 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 
 from database import init_db
-from routers import debug_router, devices_router, instances_router
+from routers import (
+    admin_router,
+    debug_router,
+    device_auth_router,
+    devices_router,
+    instances_router,
+)
 
 # Load environment variables
 load_dotenv()
@@ -41,7 +47,9 @@ It manages authentication, frame storage, diffing, and device orchestration.
 )
 
 # Include routers
+app.include_router(admin_router)
 app.include_router(debug_router)
+app.include_router(device_auth_router)
 app.include_router(devices_router)
 app.include_router(instances_router)
 

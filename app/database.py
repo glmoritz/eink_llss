@@ -26,7 +26,7 @@ engine = create_engine(
     pool_pre_ping=True,  # Verify connections before using
     pool_size=10,
     max_overflow=20,
-    echo=os.getenv("DEBUG", "false").lower() == "true",
+    echo=False,
     connect_args={"options": f"-csearch_path={SCHEMA}"},
 )
 

@@ -21,12 +21,6 @@
       }
     }
   },
-  "postCreateCommand": "pip install -r requirements.txt",  
-  "appPort": [8008],
-  "portsAttributes": {
-    "8000": {
-      "label": "FastAPI",
-      "onAutoForward": "notify"
-    }
-  }
+  "postCreateCommand": "pip install -r requirements.txt",    
+  "runArgs": ["--network=host"]
 }

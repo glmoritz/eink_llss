@@ -3,11 +3,13 @@ SQLAlchemy ORM models for LLSS database.
 """
 
 from datetime import datetime, timezone
+from enum import Enum as PyEnum
 
 from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Enum,
     ForeignKey,
     Integer,
     LargeBinary,
@@ -17,6 +19,15 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from database import Base, SCHEMA
+
+
+class DeviceAuthStatus(PyEnum):
+    """Device authorization status."""
+
+    PENDING = "pending"  # Waiting for admin approval
+    AUTHORIZED = "authorized"  # Approved and can get tokens
+    REJECTED = "rejected"  # Rejected by admin
+    REVOKED = "revoked"  # Was authorized but access revoked
 
 
 class HLSSType(Base):
@@ -85,10 +96,22 @@ class Device(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     device_id = Column(String(50), unique=True, nullable=False, index=True)
-    device_secret = Column(String(64), nullable=False)
-    access_token = Column(String(64), nullable=False, index=True)
     hardware_id = Column(String(100), unique=True, nullable=False, index=True)
+    device_secret = Column(String(64), nullable=False)  # Secret for initial auth
     firmware_version = Column(String(50), nullable=False)
+
+    # Authorization status
+    auth_status = Column(
+        String(20),
+        nullable=False,
+        default=DeviceAuthStatus.PENDING.value,
+        index=True,
+    )
+    authorized_at = Column(DateTime(timezone=True), nullable=True)
+    authorized_by = Column(String(100), nullable=True)  # Admin who authorized
+
+    # Current refresh token JTI (for revocation)
+    current_refresh_jti = Column(String(64), nullable=True)
 
     # Display capabilities
     display_width = Column(Integer, nullable=False)
@@ -115,10 +138,9 @@ class Device(Base):
         """Convert to dictionary for API responses."""
         return {
             "device_id": self.device_id,
-            "device_secret": self.device_secret,
-            "access_token": self.access_token,
             "hardware_id": self.hardware_id,
             "firmware_version": self.firmware_version,
+            "auth_status": self.auth_status,
             "display": {
                 "width": self.display_width,
                 "height": self.display_height,
