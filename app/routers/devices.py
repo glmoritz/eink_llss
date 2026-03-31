@@ -241,25 +241,77 @@ async def _check_hlss_for_new_frame(
 async def get_frame(
     device_id: str,
     frame_id: str,
+    raw: bool = False,
     _: str = Depends(get_current_device),
     db: Session = Depends(get_db),
 ) -> Response:
     """
     Fetch rendered frame data.
 
-    Returns raw framebuffer data ready to be written to the e-Ink display.
+    Returns framebuffer data appropriate for the device's display capabilities.
+
+    For devices with bit_depth 1-4, returns raw framebuffer data:
+    - bit_depth=1: 1-bit packed monochrome (width*height/8 bytes)
+    - bit_depth=2: Two concatenated 1-bit planes for 2-bit grayscale
+      (MSB plane first for EPD register 0x24, LSB plane for 0x26)
+    - bit_depth=4: 4-bit packed grayscale (width*height/2 bytes)
+
+    For devices with bit_depth > 4 or when raw=False, returns PNG image.
+
+    Args:
+        device_id: The device ID.
+        frame_id: The frame ID to fetch.
+        raw: Force raw framebuffer output even for higher bit depths.
     """
+    from frame_converter import convert_png_to_framebuffer
+
     frame = db.query(Frame).filter(Frame.frame_id == frame_id).first()
 
-    if frame and frame.data:
+    if not frame or not frame.data:
+        return Response(
+            content=b"",
+            media_type="application/octet-stream",
+        )
+
+    # Get device to check display capabilities
+    device = db.query(Device).filter(Device.device_id == device_id).first()
+
+    if not device:
+        # Device not found, return PNG as fallback
         return Response(
             content=frame.data,
             media_type="image/png",
         )
 
+    bit_depth = device.display_bit_depth or 4
+    display_width = device.display_width
+    display_height = device.display_height
+
+    # For low bit depths (1, 2, 4) or when raw is requested, convert to framebuffer
+    if bit_depth <= 4 or raw:
+        try:
+            framebuffer_data, media_type = convert_png_to_framebuffer(
+                png_data=frame.data,
+                target_bit_depth=bit_depth,
+                expected_width=display_width,
+                expected_height=display_height,
+            )
+            return Response(
+                content=framebuffer_data,
+                media_type=media_type,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to convert frame to bit_depth={bit_depth}: {e}")
+            # Fall back to PNG on conversion error
+            return Response(
+                content=frame.data,
+                media_type="image/png",
+            )
+
+    # For higher bit depths without raw flag, return PNG
     return Response(
-        content=b"",
-        media_type="application/octet-stream",
+        content=frame.data,
+        media_type="image/png",
     )
 
 
