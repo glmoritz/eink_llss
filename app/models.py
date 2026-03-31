@@ -38,6 +38,13 @@ class DeviceAction(str, Enum):
     SLEEP = "SLEEP"
 
 
+class InputProcessStatus(str, Enum):
+    NEW_FRAME = "NEW_FRAME"
+    NO_CHANGE = "NO_CHANGE"
+    POLL = "POLL"
+    ERROR = "ERROR"
+
+
 class InstanceStatus(str, Enum):
     """Status of an HLSS instance."""
 
@@ -83,6 +90,15 @@ class InputEvent(BaseModel):
     button: ButtonType
     event_type: EventType
     timestamp: datetime
+
+
+class InputProcessResponse(BaseModel):
+    status: InputProcessStatus
+    frame_id: Optional[str] = None
+    poll_after_ms: Optional[int] = Field(
+        default=None, description="Suggested polling delay in milliseconds"
+    )
+    message: Optional[str] = None
 
 
 # Instance Models

@@ -4,7 +4,8 @@ JWT Authentication module for LLSS.
 This module handles JWT token generation and validation for:
 - Device access tokens (short-lived, 1 day)
 - Device refresh tokens (long-lived, 30 days)
-- Instance access tokens
+- Instance access tokens (signed with shared key)
+- LLSS orchestrator tokens (signed with shared key)
 """
 
 import os
@@ -16,7 +17,9 @@ from pydantic import BaseModel
 
 # Configuration
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
-ALGORITHM = "HS256"
+HLSS_SHARED_KEY = os.getenv("HLSS_SHARED_KEY", SECRET_KEY)
+ALGORITHM = os.getenv("HLSS_JWT_ALGORITHM", "HS256")
+
 
 # Token expiration times
 ACCESS_TOKEN_EXPIRE_DAYS = 1  # 1 day for access tokens
@@ -48,6 +51,7 @@ def create_access_token(
     token_type: str = "device_access",
     expires_delta: Optional[timedelta] = None,
     jti: Optional[str] = None,
+    secret_key: Optional[str] = None,
 ) -> str:
     """
     Create a JWT access token.
@@ -77,7 +81,33 @@ def create_access_token(
     if jti:
         to_encode["jti"] = jti
 
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    key = secret_key or SECRET_KEY
+    return jwt.encode(to_encode, key, algorithm=ALGORITHM)
+
+
+def create_instance_access_token(
+    subject_id: str,
+    expires_delta: Optional[timedelta] = None,
+    jti: Optional[str] = None,
+) -> str:
+    """
+    Create a JWT access token for HLSS instances using the shared key.
+
+    Args:
+        subject_id: The instance_id
+        expires_delta: Custom expiration time
+        jti: Optional JWT ID for tracking
+
+    Returns:
+        Encoded JWT token string
+    """
+    return create_access_token(
+        subject_id=subject_id,
+        token_type="instance_access",
+        expires_delta=expires_delta,
+        jti=jti,
+        secret_key=HLSS_SHARED_KEY,
+    )
 
 
 def create_refresh_token(
@@ -115,7 +145,7 @@ def create_refresh_token(
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def decode_token(token: str) -> Optional[TokenData]:
+def decode_token(token: str, secret_key: Optional[str] = None) -> Optional[TokenData]:
     """
     Decode and validate a JWT token.
 
@@ -126,7 +156,8 @@ def decode_token(token: str) -> Optional[TokenData]:
         TokenData if valid, None if invalid or expired
     """
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        key = secret_key or SECRET_KEY
+        payload = jwt.decode(token, key, algorithms=[ALGORITHM])
 
         return TokenData(
             subject_id=payload.get("sub", ""),
@@ -139,7 +170,11 @@ def decode_token(token: str) -> Optional[TokenData]:
         return None
 
 
-def verify_token(token: str, expected_type: str) -> Optional[TokenData]:
+def verify_token(
+    token: str,
+    expected_type: str,
+    secret_key: Optional[str] = None,
+) -> Optional[TokenData]:
     """
     Verify a JWT token and check its type.
 
@@ -150,7 +185,7 @@ def verify_token(token: str, expected_type: str) -> Optional[TokenData]:
     Returns:
         TokenData if valid and correct type, None otherwise
     """
-    token_data = decode_token(token)
+    token_data = decode_token(token, secret_key=secret_key)
 
     if token_data is None:
         return None

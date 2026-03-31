@@ -8,7 +8,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
-from auth import verify_token
+from auth import HLSS_SHARED_KEY, verify_token
 from database import get_db
 from db_models import Device, DeviceAuthStatus, Instance
 
@@ -157,8 +157,8 @@ async def get_current_instance(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # First try JWT token
-    token_data = verify_token(token, "instance_access")
+    # First try JWT token signed with the HLSS shared key
+    token_data = verify_token(token, "instance_access", secret_key=HLSS_SHARED_KEY)
 
     if token_data:
         # Valid JWT token
@@ -181,3 +181,39 @@ async def get_current_instance(
         )
 
     return str(instance.instance_id)
+
+
+async def get_llss_admin(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> str:
+    """
+    Validate LLSS orchestrator token for managing HLSS instances.
+
+    Requires a JWT token with type "llss_admin" signed using the shared key.
+    """
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = credentials.credentials
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token_data = verify_token(token, "llss_admin", secret_key=HLSS_SHARED_KEY)
+
+    if not token_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return token_data.subject_id

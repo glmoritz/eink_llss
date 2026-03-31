@@ -9,7 +9,6 @@ These endpoints provide the administrative API for:
 """
 
 import os
-import secrets
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -18,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
+from auth import create_instance_access_token
 from database import get_db
 from db_models import (
     Device,
@@ -312,7 +312,7 @@ async def create_instance(
 
     # Generate instance credentials
     instance_id = f"inst_{uuid.uuid4().hex[:12]}"
-    access_token = secrets.token_urlsafe(32)
+    access_token = create_instance_access_token(instance_id)
     created_at = datetime.now(timezone.utc)
 
     # Determine display configuration
@@ -1630,7 +1630,7 @@ async def admin_dashboard(request: Request) -> HTMLResponse:
         function renderInstances() {{
             const c = document.getElementById('instancesTable');
             if (!instances.length) {{ c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📱</div><div>No instances created</div></div>'; return; }}
-            c.innerHTML = `<table><thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Display</th><th>Token</th><th>Actions</th></tr></thead><tbody>${{instances.map(i => `<tr><td><strong>${{i.name}}</strong><div style="font-size:0.8rem;color:#666">${{i.instance_id}}</div></td><td>${{i.type}}</td><td>${{getStatusBadge(i)}}${{i.configuration_url?`<div class="config-url"><a href="${{i.configuration_url}}" target="_blank">Configure →</a></div>`:''}}</td><td>${{i.display?`${{i.display.width}}x${{i.display.height}}`:'-'}}</td><td><span class="instance-token" onclick="copyToken('${{i.access_token}}')" style="cursor:pointer">${{i.access_token?i.access_token.substring(0,16)+'...':'-'}}</span></td><td class="actions">${{!i.hlss_initialized?`<button class="btn btn-success btn-small" onclick="initInstance('${{i.instance_id}}')">⚡</button>`:''}}<button class="btn btn-secondary btn-small" onclick="refreshStatus('${{i.instance_id}}')">🔄</button><button class="btn btn-danger btn-small" onclick="deleteInstance('${{i.instance_id}}')">🗑️</button></td></tr>`).join('')}}</tbody></table>`;
+            c.innerHTML = `<table><thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Display</th><th>Token</th><th>Actions</th></tr></thead><tbody>${{instances.map(i => `<tr><td><strong>${{i.name}}</strong><div style="font-size:0.8rem;color:#666">${{i.instance_id}}</div></td><td>${{i.type}}</td><td>${{getStatusBadge(i)}}${{`<div class="config-url"><a href="#" onclick='event.preventDefault(); configureInstance("${{i.instance_id}}", ${{i.configuration_url?JSON.stringify(i.configuration_url):'null'}})'>Configure →</a></div>`}}</td><td>${{i.display?`${{i.display.width}}x${{i.display.height}}`:'-'}}</td><td><span class="instance-token" onclick="copyToken('${{i.access_token}}')" style="cursor:pointer">${{i.access_token?i.access_token.substring(0,16)+'...':'-'}}</span></td><td class="actions">${{!i.hlss_initialized?`<button class="btn btn-success btn-small" onclick="initInstance('${{i.instance_id}}')">⚡</button>`:''}}<button class="btn btn-secondary btn-small" onclick="refreshStatus('${{i.instance_id}}')">🔄</button><button class="btn btn-danger btn-small" onclick="deleteInstance('${{i.instance_id}}')">🗑️</button></td></tr>`).join('')}}</tbody></table>`;
         }}
 
         function getStatusBadge(i) {{
@@ -1640,10 +1640,31 @@ async def admin_dashboard(request: Request) -> HTMLResponse:
             return '<span class="badge badge-warning">Initializing</span>';
         }}
 
+        function getAuthBadge(status) {{
+            if (status === 'authorized') return '<span class="badge badge-success">Authorized</span>';
+            if (status === 'pending') return '<span class="badge badge-warning">Pending</span>';
+            if (status === 'rejected') return '<span class="badge badge-danger">Rejected</span>';
+            if (status === 'revoked') return '<span class="badge badge-danger">Revoked</span>';
+            return '<span class="badge">Unknown</span>';
+        }}
+
+        function getDeviceActions(d) {{
+            if (d.auth_status === 'pending') {{
+                return `<button class="btn btn-success btn-small" onclick="authorizeDevice('${{d.device_id}}')">✅</button><button class="btn btn-danger btn-small" onclick="rejectDevice('${{d.device_id}}')">✖️</button>`;
+            }}
+            if (d.auth_status === 'authorized') {{
+                return `<button class="btn btn-danger btn-small" onclick="revokeDevice('${{d.device_id}}')">⛔</button>`;
+            }}
+            if (d.auth_status === 'rejected' || d.auth_status === 'revoked') {{
+                return `<button class="btn btn-success btn-small" onclick="reauthorizeDevice('${{d.device_id}}')">♻️</button>`;
+            }}
+            return '';
+        }}
+
         function renderDevices() {{
             const c = document.getElementById('devicesTable');
             if (!devices.length) {{ c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🖥️</div><div>No devices registered</div></div>'; return; }}
-            c.innerHTML = `<table><thead><tr><th>Device</th><th>Display</th><th>Active Instance</th><th>Assigned</th><th>Last Seen</th><th>Actions</th></tr></thead><tbody>${{devices.map(d => `<tr><td><strong>${{d.hardware_id}}</strong><div style="font-size:0.8rem;color:#666">${{d.device_id}}</div></td><td>${{d.display.width}}x${{d.display.height}} @${{d.display.bit_depth}}bpp</td><td>${{d.active_instance_id?`<span class="badge badge-success">${{getInstName(d.active_instance_id)}}</span>`:'<span class="badge badge-warning">None</span>'}}</td><td>${{d.assigned_instances.length}}</td><td style="font-size:0.85rem;color:#888">${{d.last_seen_at?new Date(d.last_seen_at).toLocaleString():'Never'}}</td><td class="actions"><button class="btn btn-primary btn-small" onclick="showAssignModal('${{d.device_id}}','${{d.hardware_id}}')">+</button></td></tr>`).join('')}}</tbody></table>`;
+            c.innerHTML = `<table><thead><tr><th>Device</th><th>Display</th><th>Status</th><th>Active Instance</th><th>Assigned</th><th>Last Seen</th><th>Actions</th></tr></thead><tbody>${{devices.map(d => `<tr><td><strong>${{d.hardware_id}}</strong><div style="font-size:0.8rem;color:#666">${{d.device_id}}</div></td><td>${{d.display.width}}x${{d.display.height}} @${{d.display.bit_depth}}bpp</td><td>${{getAuthBadge(d.auth_status)}}</td><td>${{d.active_instance_id?`<span class="badge badge-success">${{getInstName(d.active_instance_id)}}</span>`:'<span class="badge badge-warning">None</span>'}}</td><td>${{d.assigned_instances.length}}</td><td style="font-size:0.85rem;color:#888">${{d.last_seen_at?new Date(d.last_seen_at).toLocaleString():'Never'}}</td><td class="actions">${{getDeviceActions(d)}}<button class="btn btn-primary btn-small" onclick="showAssignModal('${{d.device_id}}','${{d.hardware_id}}')">+</button></td></tr>`).join('')}}</tbody></table>`;
         }}
 
         function getInstName(id) {{ const i = instances.find(x => x.instance_id === id); return i ? i.name : id; }}
@@ -1698,6 +1719,23 @@ async def admin_dashboard(request: Request) -> HTMLResponse:
         async function deleteInstance(id) {{ if (!confirm('Delete this instance?')) return; try {{ await apiCall(`/admin/instances/${{id}}`, 'DELETE'); showToast('Deleted'); loadInstances(); loadStats(); }} catch (e) {{ showToast(e.message, true); }} }}
         async function initInstance(id) {{ try {{ await apiCall(`/admin/instances/${{id}}/initialize`, 'POST'); showToast('Initialized'); loadInstances(); loadStats(); }} catch (e) {{ showToast(e.message, true); }} }}
         async function refreshStatus(id) {{ try {{ await apiCall(`/admin/instances/${{id}}/refresh-status`, 'POST'); showToast('Refreshed'); loadInstances(); }} catch (e) {{ showToast(e.message, true); }} }}
+
+        function configureInstance(id, url) {{
+            if (url) {{
+                try {{
+                    window.open(url, '_blank');
+                }} catch (e) {{
+                    showToast('Failed to open configuration URL', true);
+                }}
+            }} else {{
+                showToast('Refreshing instance status...', false);
+                refreshStatus(id);
+            }}
+        }}
+        async function authorizeDevice(id) {{ try {{ await apiCall(`/admin/devices/${{id}}/authorize`, 'POST'); showToast('Device authorized'); loadDevices(); loadStats(); }} catch (e) {{ showToast(e.message, true); }} }}
+        async function rejectDevice(id) {{ if (!confirm('Reject this device?')) return; try {{ await apiCall(`/admin/devices/${{id}}/reject`, 'POST'); showToast('Device rejected'); loadDevices(); loadStats(); }} catch (e) {{ showToast(e.message, true); }} }}
+        async function revokeDevice(id) {{ if (!confirm('Revoke device access?')) return; try {{ await apiCall(`/admin/devices/${{id}}/revoke`, 'POST'); showToast('Device revoked'); loadDevices(); loadStats(); }} catch (e) {{ showToast(e.message, true); }} }}
+        async function reauthorizeDevice(id) {{ try {{ await apiCall(`/admin/devices/${{id}}/reauthorize`, 'POST'); showToast('Device re-authorized'); loadDevices(); loadStats(); }} catch (e) {{ showToast(e.message, true); }} }}
         function copyToken(t) {{ if (!t) return; navigator.clipboard.writeText(t).then(() => showToast('Token copied')).catch(() => showToast('Copy failed', true)); }}
     </script>
 </body>

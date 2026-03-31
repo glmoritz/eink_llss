@@ -162,7 +162,7 @@ class Instance(Base):
     instance_id = Column(String(50), unique=True, nullable=False, index=True)
     name = Column(String(255), nullable=False)
     type = Column(String(100), nullable=False)
-    access_token = Column(String(64), nullable=True, index=True)
+    access_token = Column(Text, nullable=True)
 
     # HLSS type reference (optional for backwards compatibility)
     hlss_type_id = Column(

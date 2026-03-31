@@ -49,7 +49,7 @@ async def debug_emulator(request: Request) -> HTMLResponse:
         }}
         
         .container {{
-            max-width: 800px;
+            max-width: 1000px;
             margin: 0 auto;
         }}
         
@@ -208,11 +208,13 @@ async def debug_emulator(request: Request) -> HTMLResponse:
             border-radius: 8px;
             padding: 10px;
             margin-bottom: 20px;
+            display: flex;
+            justify-content: center;
         }}
         
         .screen {{
-            width: 100%;
-            aspect-ratio: 4/3;
+            width: 800px;
+            height: 480px;
             background: #e8e4d9;
             border-radius: 4px;
             display: flex;
@@ -223,10 +225,26 @@ async def debug_emulator(request: Request) -> HTMLResponse:
         }}
         
         .screen img {{
-            max-width: 100%;
-            max-height: 100%;
+            width: 100%;
+            height: 100%;
             object-fit: contain;
             image-rendering: pixelated;
+        }}
+
+        .screen-controls {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 10px 0 15px;
+            color: #ddd;
+            font-size: 0.9rem;
+        }}
+
+        .screen-controls input[type="checkbox"] {{
+            width: 18px;
+            height: 18px;
+            accent-color: #00d9ff;
+            cursor: pointer;
         }}
         
         .screen .no-frame {{
@@ -463,7 +481,7 @@ async def debug_emulator(request: Request) -> HTMLResponse:
                     <input type="text" id="reg-firmware" placeholder="Firmware Version (e.g., 1.0.0)">
                     <div class="form-row">
                         <input type="number" id="reg-width" placeholder="Width (e.g., 800)" value="800">
-                        <input type="number" id="reg-height" placeholder="Height (e.g., 600)" value="600">
+                        <input type="number" id="reg-height" placeholder="Height (e.g., 480)" value="480">
                     </div>
                     <div class="form-row">
                         <input type="number" id="reg-bit-depth" placeholder="Bit Depth" value="4">
@@ -775,6 +793,11 @@ async def debug_emulator(request: Request) -> HTMLResponse:
                             </div>
                         </div>
                     </div>
+
+                    <div class="screen-controls">
+                        <input type="checkbox" id="long-press-toggle">
+                        <label for="long-press-toggle">Send long press events</label>
+                    </div>
                     
                     <div class="bottom-buttons">
                         <button class="bottom-btn" onclick="sendButton('BTN_1')">1</button>
@@ -894,14 +917,18 @@ async def debug_emulator(request: Request) -> HTMLResponse:
                 log('error', 'No device selected or not authenticated');
                 return;
             }}
+
+            const longPressToggle = document.getElementById('long-press-toggle');
+            const isLongPress = longPressToggle ? longPressToggle.checked : false;
+            const eventType = isLongPress ? 'LONG_PRESS' : 'PRESS';
             
             const event = {{
                 button: button,
-                event_type: 'PRESS',
+                event_type: eventType,
                 timestamp: new Date().toISOString()
             }};
             
-            log('event', `Button pressed: ${{button}}`);
+            log('event', `${{eventType === 'LONG_PRESS' ? 'Long press' : 'Button press'}}: ${{button}}`);
             
             try {{
                 const resp = await apiCallWithRetry(
@@ -916,7 +943,25 @@ async def debug_emulator(request: Request) -> HTMLResponse:
                 );
                 
                 if (resp.ok) {{
-                    log('success', `Input event sent: ${{button}}`);
+                    const result = await resp.json().catch(() => null);
+                    if (result) {{
+                        const statusText = result.status ? `Status: ${{result.status}}` : 'Input processed';
+                        const frameText = result.frame_id ? ` (frame: ${{result.frame_id}})` : '';
+                        log('success', `${{statusText}}${{frameText}}`);
+                        if (result.message) {{
+                            log('info', result.message);
+                        }}
+                        if (result.status === 'NEW_FRAME' && result.frame_id) {{
+                            await fetchFrameById(result.frame_id);
+                            return;
+                        }}
+                        if (result.status === 'POLL' && result.poll_after_ms) {{
+                            setTimeout(pollState, result.poll_after_ms);
+                            return;
+                        }}
+                    }} else {{
+                        log('success', `Input event sent: ${{button}}`);
+                    }}
                     // Poll for new frame after button press
                     setTimeout(pollState, 100);
                 }} else {{

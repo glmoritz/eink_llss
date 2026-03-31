@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Low Level Screen Service (LLSS) API
-  version: 0.2.0
+  version: 0.2.1
   description: >
     The Low Level Screen Service (LLSS) brokers communication between
     e-Ink display devices and High Level Screen Service (HLSS) instances.
@@ -39,6 +39,16 @@ info:
     
     7. **Renew Refresh Token**: Periodically (e.g., every 15 days), device calls `POST /auth/devices/renew-refresh`
        with access token to get a new 30-day refresh token before it expires.
+
+
+    ### Server-to-Server (LLSS ↔ HLSS)
+
+    LLSS and HLSS share a symmetric key set via the `HLSS_SHARED_KEY` environment variable.
+    LLSS uses this key to issue JWTs that HLSS can validate locally.
+
+    - **Orchestrator Token** (`llss_admin`): High-privilege JWT used to create/manage HLSS instances.
+    - **Instance Token** (`instance_access`): JWT issued to an HLSS instance so it can call back to LLSS
+      (submit frames, notify changes, receive inputs).
 
 servers:
   - url: https://eink.tutu.eng.br/api
@@ -309,8 +319,12 @@ paths:
             schema:
               $ref: "#/components/schemas/InputEvent"
       responses:
-        "202":
-          description: Input event accepted
+        "200":
+          description: Input processing result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InputProcessResponse"
 
   /instances:
     post:
@@ -318,6 +332,8 @@ paths:
       summary: Create a new HLSS instance
       description: >
         Creates a new logical HLSS instance (e.g. a chess game or HA dashboard).
+      security:
+        - OrchestratorAuth: []
       requestBody:
         required: true
         content:
@@ -339,6 +355,8 @@ paths:
       description: >
         HLSS submits a newly rendered frame (PNG).
         LLSS stores, diffs, and schedules device refreshes.
+      security:
+        - InstanceAuth: []
       parameters:
         - name: instance_id
           in: path
@@ -367,6 +385,8 @@ paths:
       description: >
         Notifies LLSS that the instance state has changed and a new frame
         may be available or should be requested.
+      security:
+        - InstanceAuth: []
       parameters:
         - name: instance_id
           in: path
@@ -383,6 +403,8 @@ paths:
       summary: Receive forwarded input events
       description: >
         LLSS forwards device input events to the active HLSS instance.
+      security:
+        - InstanceAuth: []
       parameters:
         - name: instance_id
           in: path
@@ -566,6 +588,22 @@ components:
       description: >
         JWT refresh token obtained from `/auth/devices/token`.
         Valid for 30 days. Used only for `/auth/devices/refresh` endpoint.
+
+    InstanceAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        JWT issued by LLSS for HLSS instances (type `instance_access`).
+        Signed with the shared key (`HLSS_SHARED_KEY`) and used for instance callbacks.
+
+    OrchestratorAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        High-privilege JWT for LLSS orchestrator actions (type `llss_admin`).
+        Signed with the shared key (`HLSS_SHARED_KEY`).
 
   schemas:
 
@@ -820,6 +858,28 @@ components:
           format: date-time
           description: When the event occurred (ISO 8601)
 
+    InputProcessResponse:
+      type: object
+      description: Result of input processing
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [NEW_FRAME, NO_CHANGE, POLL, ERROR]
+          description: Processing outcome
+        frame_id:
+          type: string
+          nullable: true
+          description: New frame ID when status is NEW_FRAME
+        poll_after_ms:
+          type: integer
+          nullable: true
+          description: Suggested polling delay in milliseconds when status is POLL
+        message:
+          type: string
+          nullable: true
+          description: Optional info or error message
+
     # ============================================================
     # Instance Schemas
     # ============================================================
@@ -855,7 +915,7 @@ components:
         access_token:
           type: string
           nullable: true
-          description: Access token for HLSS to authenticate with LLSS
+          description: JWT (type `instance_access`) for HLSS to authenticate with LLSS, signed with `HLSS_SHARED_KEY`
         created_at:
           type: string
           format: date-time

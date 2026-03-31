@@ -7,7 +7,7 @@ import os
 import secrets
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
@@ -30,7 +30,10 @@ from models import (
     DeviceRegistration,
     DeviceRegistrationResponse,
     DeviceStateResponse,
+    EventType,
     InputEvent as InputEventSchema,
+    InputProcessResponse,
+    InputProcessStatus,
 )
 
 router = APIRouter(prefix="/devices", tags=["Devices"])
@@ -260,13 +263,17 @@ async def get_frame(
     )
 
 
-@router.post("/{device_id}/inputs", status_code=202)
+@router.post(
+    "/{device_id}/inputs",
+    response_model=InputProcessResponse,
+    status_code=200,
+)
 async def submit_input(
     device_id: str,
     event: InputEventSchema,
     _: str = Depends(get_current_device),
     db: Session = Depends(get_db),
-) -> dict:
+) -> InputProcessResponse:
     """
     Submit input events from a device.
 
@@ -279,7 +286,12 @@ async def submit_input(
     # Get device to find active instance
     device = db.query(Device).filter(Device.device_id == device_id).first()
     if not device:
-        return {"message": "Device not found"}
+        return InputProcessResponse(
+            status=InputProcessStatus.ERROR,
+            message="Device not found",
+        )
+
+    previous_frame_id = cast(Optional[str], device.current_frame_id)
 
     # Log the input event
     input_event = InputEvent(
@@ -291,19 +303,54 @@ async def submit_input(
     )
     db.add(input_event)
 
-    # Handle screen switching with HL_LEFT and HL_RIGHT
+    # Handle screen switching with HL_LEFT and HL_RIGHT on long press only
     if event.button in (ButtonType.HL_LEFT, ButtonType.HL_RIGHT):
-        await _handle_screen_switch(db, device, event.button)
-        db.commit()
-        return {"message": "Screen switch processed"}
+        if event.event_type == EventType.LONG_PRESS:
+            await _handle_screen_switch(db, device, event.button)
+            db.commit()
+            current_frame_id = cast(Optional[str], device.current_frame_id)
+            if current_frame_id and current_frame_id != previous_frame_id:
+                return InputProcessResponse(
+                    status=InputProcessStatus.NEW_FRAME,
+                    frame_id=current_frame_id,
+                    message="Screen switch processed",
+                )
+            return InputProcessResponse(
+                status=InputProcessStatus.NO_CHANGE,
+                message="Screen switch processed",
+            )
 
     db.commit()
 
     # Forward to active HLSS instance
-    if device.active_instance_id:
-        await _forward_input_to_hlss(db, device.active_instance_id, event)
+    active_instance_id = cast(Optional[str], device.active_instance_id)
+    if active_instance_id:
+        success, error = await _forward_input_to_hlss(db, active_instance_id, event)
+        if not success:
+            return InputProcessResponse(
+                status=InputProcessStatus.ERROR,
+                message=error or "Failed to forward input to HLSS",
+            )
 
-    return {"message": "Input processed"}
+    current_frame_id = cast(Optional[str], device.current_frame_id)
+    if current_frame_id and current_frame_id != previous_frame_id:
+        return InputProcessResponse(
+            status=InputProcessStatus.NEW_FRAME,
+            frame_id=current_frame_id,
+            message="Input processed",
+        )
+
+    if active_instance_id:
+        return InputProcessResponse(
+            status=InputProcessStatus.POLL,
+            poll_after_ms=200,
+            message="Input processed; poll for new frame",
+        )
+
+    return InputProcessResponse(
+        status=InputProcessStatus.NO_CHANGE,
+        message="Input processed",
+    )
 
 
 async def _handle_screen_switch(
@@ -368,12 +415,12 @@ async def _forward_input_to_hlss(
     db: Session,
     instance_id: str,
     event: InputEventSchema,
-) -> None:
+) -> tuple[bool, Optional[str]]:
     """Forward an input event to the HLSS backend."""
     # Get instance and its HLSS type
     instance = db.query(Instance).filter(Instance.instance_id == instance_id).first()
     if not instance or not instance.hlss_type_id:
-        return
+        return False, "Instance or HLSS type not configured"
 
     hlss_type = (
         db.query(HLSSTypeModel)
@@ -382,7 +429,7 @@ async def _forward_input_to_hlss(
     )
 
     if not hlss_type or not hlss_type.is_active:
-        return
+        return False, "HLSS type is not active"
 
     # Forward the input event
     try:
@@ -394,5 +441,8 @@ async def _forward_input_to_hlss(
         )
         if not success:
             logger.warning(f"Failed to forward input to HLSS: {error}")
+            return False, error or "Failed to forward input to HLSS"
+        return True, None
     except Exception as e:
         logger.error(f"Error forwarding input to HLSS: {e}")
+        return False, "Error forwarding input to HLSS"

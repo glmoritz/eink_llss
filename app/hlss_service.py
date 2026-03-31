@@ -9,12 +9,14 @@ This module handles:
 """
 
 import logging
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
 import httpx
 from sqlalchemy.orm import Session
 
+from auth import HLSS_SHARED_KEY, create_access_token, decode_token
 from db_models import HLSSType, Instance
 from models import (
     DisplayCapabilities,
@@ -28,6 +30,8 @@ from models import (
 )
 
 logger = logging.getLogger(__name__)
+LLSS_SERVICE_ID = os.getenv("LLSS_SERVICE_ID", "llss_orchestrator")
+HLSS_JWT_CACHE_SKEW_SECONDS = int(os.getenv("HLSS_JWT_CACHE_SKEW_SECONDS", "60"))
 
 
 class HLSSService:
@@ -38,6 +42,7 @@ class HLSSService:
         llss_base_url: str,
         hlss_base_url: str,
         auth_token: Optional[str] = None,
+        use_shared_jwt: bool = True,
         timeout: float = 30.0,
     ):
         """
@@ -46,13 +51,17 @@ class HLSSService:
         Args:
             llss_base_url: The base URL of the LLSS API (for constructing callbacks).
             hlss_base_url: The base URL of the HLSS backend.
-            auth_token: Optional auth token for HLSS API.
+            auth_token: Optional auth token for HLSS API (deprecated when using shared JWT).
+            use_shared_jwt: Whether to use shared-key JWT for HLSS calls.
             timeout: Request timeout in seconds.
         """
         self.llss_base_url = llss_base_url.rstrip("/")
         self.hlss_base_url = hlss_base_url.rstrip("/")
         self.auth_token = auth_token
+        self.use_shared_jwt = use_shared_jwt
         self.timeout = timeout
+        self._cached_shared_jwt: Optional[str] = None
+        self._cached_shared_jwt_expires_at: Optional[datetime] = None
 
     @classmethod
     def from_hlss_type(
@@ -89,9 +98,38 @@ class HLSSService:
         headers = {}
         if content_type:
             headers["Content-Type"] = "application/json"
-        if self.auth_token:
+        if self.use_shared_jwt:
+            token = self._get_shared_jwt()
+            headers["Authorization"] = f"Bearer {token}"
+        elif self.auth_token:
             headers["Authorization"] = f"Bearer {self.auth_token}"
         return headers
+
+    def _get_shared_jwt(self) -> str:
+        """Get cached shared-key JWT for HLSS calls, refreshing if needed."""
+        now = datetime.now(timezone.utc)
+        if (
+            self._cached_shared_jwt
+            and self._cached_shared_jwt_expires_at
+            and (self._cached_shared_jwt_expires_at - now).total_seconds()
+            > HLSS_JWT_CACHE_SKEW_SECONDS
+        ):
+            return self._cached_shared_jwt
+
+        token = create_access_token(
+            LLSS_SERVICE_ID,
+            token_type="llss_admin",
+            secret_key=HLSS_SHARED_KEY,
+        )
+
+        token_data = decode_token(token, secret_key=HLSS_SHARED_KEY)
+        self._cached_shared_jwt = token
+        self._cached_shared_jwt_expires_at = (
+            token_data.expires_at
+            if token_data and token_data.expires_at
+            else now + timedelta(days=1)
+        )
+        return token
 
     async def initialize_instance(
         self,

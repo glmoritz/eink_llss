@@ -3,16 +3,16 @@ Instance routes - HLSS instances managed by LLSS
 """
 
 import hashlib
-import secrets
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, UploadFile
 from sqlalchemy.orm import Session
 
+from auth import create_instance_access_token
 from database import get_db
 from db_models import Device, Frame, Instance as InstanceModel
-from dependencies import get_current_instance
+from dependencies import get_current_instance, get_llss_admin
 from models import (
     FrameCreateResponse,
     InputEvent,
@@ -26,6 +26,7 @@ router = APIRouter(prefix="/instances", tags=["Instances"])
 @router.post("", response_model=Instance, status_code=201)
 async def create_instance(
     instance: InstanceCreate,
+    _: str = Depends(get_llss_admin),
     db: Session = Depends(get_db),
 ) -> Instance:
     """
@@ -34,7 +35,7 @@ async def create_instance(
     Creates a new logical HLSS instance (e.g. a chess game or HA dashboard).
     """
     instance_id = f"inst_{uuid.uuid4().hex[:12]}"
-    access_token = secrets.token_urlsafe(32)
+    access_token = create_instance_access_token(instance_id)
     created_at = datetime.now(timezone.utc)
 
     # Create instance in database
