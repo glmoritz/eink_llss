@@ -76,13 +76,44 @@ async def submit_frame(
     LLSS stores, diffs, and schedules device refreshes.
     """
     content = await file.read()
-
-    # Generate frame ID and hash
-    frame_id = f"frame_{uuid.uuid4().hex[:12]}"
     frame_hash = hashlib.sha256(content).hexdigest()[:16]
+
+    # Dedup: if this instance already has a frame with identical content, reuse
+    # it instead of minting a new id. HLSS re-submits on every poll even when the
+    # rendered screen is unchanged; without this each submit created a new
+    # frame_id and bumped current_frame_id, so the device re-fetched and
+    # re-displayed the same image forever (and the frames table grew unbounded).
+    existing = (
+        db.query(Frame)
+        .filter(Frame.instance_id == instance_id, Frame.hash == frame_hash)
+        .order_by(Frame.created_at.desc())
+        .first()
+    )
+
+    if existing:
+        frame_id = existing.frame_id
+        # Point devices at it only if they aren't already — never re-bump to a
+        # new id for identical content (that is what triggered re-display).
+        devices = (
+            db.query(Device).filter(Device.active_instance_id == instance_id).all()
+        )
+        changed = False
+        for device in devices:
+            if device.current_frame_id != frame_id:
+                device.current_frame_id = frame_id
+                changed = True
+        if changed:
+            db.commit()
+        return FrameCreateResponse(
+            frame_id=frame_id,
+            hash=frame_hash,
+            created_at=existing.created_at,
+        )
+
+    # New content — store it and point devices at it.
+    frame_id = f"frame_{uuid.uuid4().hex[:12]}"
     created_at = datetime.now(timezone.utc)
 
-    # Store the frame in database
     frame = Frame(
         frame_id=frame_id,
         instance_id=instance_id,

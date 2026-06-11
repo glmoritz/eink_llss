@@ -508,7 +508,7 @@ async def debug_emulator(request: Request) -> HTMLResponse:
     </div>
     
     <script>
-        const BASE_URL = '{base_url}';
+        const BASE_URL = '{base_url}/api';
         let currentDevice = null;
         let currentToken = null;  // JWT access token
         let currentRefreshToken = null;  // JWT refresh token

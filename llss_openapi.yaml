@@ -7,8 +7,8 @@ info:
     The Low Level Screen Service (LLSS) brokers communication between
     e-Ink display devices and High Level Screen Service (HLSS) instances.
     It manages authentication, frame storage, diffing, and device orchestration.
-    
-    
+
+
     ## Authentication
     
     LLSS uses JWT-based authentication with two token types:
@@ -51,7 +51,7 @@ info:
       (submit frames, notify changes, receive inputs).
 
 servers:
-  - url: https://eink.tutu.eng.br/api
+  - url: https://eink.tutu.eng.br:9608/api
 
 security:
   - BearerAuth: []
@@ -279,28 +279,53 @@ paths:
       summary: Fetch rendered frame data
       description: >
         Returns framebuffer data appropriate for the device's display capabilities.
-        The server automatically converts the stored PNG frame to the raw format
-        matching the device's registered bit_depth.
-        
-
-        **Supported bit depths:**
+        By default the server always returns a PNG image regardless of bit_depth.
+        Use ?raw=true to receive packed raw framebuffer bytes instead.
 
 
-        - **bit_depth=1**: 1-bit packed monochrome (width×height÷8 bytes).
-          Threshold at 128: values ≥128 become white (1), <128 become black (0).
+        **Default (PNG) response per bit_depth:**
 
-        - **bit_depth=2**: Two concatenated 1-bit planes for 2-bit grayscale
-          (width×height÷8×2 bytes total). MSB plane is written to EPD register 0x24,
-          LSB plane to register 0x26. Supports 4 gray levels (0=black, 3=white).
 
-        - **bit_depth=4**: 4-bit packed grayscale (width×height÷2 bytes).
-          High nibble is the first pixel, low nibble is the second. 16 gray levels.
+        - **bit_depth=1**: 1-bit grayscale PNG. Decoder should threshold at 128.
 
-        - **bit_depth>4**: Returns PNG image data as-is (for compatibility).
+        - **bit_depth=2**: 8-bit grayscale PNG quantised to 4 levels
+          (0=black, 85=dark gray, 170=light gray, 255=white).
+          Decoded to L8 by the client; driver maps luma>>6 to the two EPD RAM planes.
+
+        - **bit_depth=4**: 8-bit grayscale PNG quantised to 16 levels.
+
+        - **bit_depth>4**: Full-colour PNG as stored (no conversion).
+
+
+        **Raw (?raw=true) response per bit_depth:**
+
+
+        - **bit_depth=1**: 1-bit packed monochrome (width x height / 8 bytes).
+
+        - **bit_depth=2**: Two concatenated 1-bit planes (width x height / 8 x 2 bytes).
+          MSB plane to EPD register 0x24, LSB plane to register 0x26.
+
+        - **bit_depth=4**: 4-bit packed grayscale (width x height / 2 bytes).
+          High nibble is the first pixel, low nibble is the second.
 
 
         If the frame dimensions don't match the device's display dimensions,
         the server will automatically resize the image.
+
+
+        **Full frame (default):** the returned image is the complete display,
+        with the top and bottom button-label strips already rendered into it
+        (see `top_strip_height` / `bottom_strip_height` in DisplayCapabilities).
+        The device blits the whole image and refreshes.
+
+
+        **Pressed strip (optional, added in extension):** use `?strip=top_pressed`
+        or `?strip=bottom_pressed` to fetch just that strip rendered with its
+        buttons in the *pressed* visual state, for local press feedback. The device
+        MAY cache this and, on a button press, blit the pressed slice over the
+        current image without a server round-trip. This is purely optional — if the
+        device skips it (or the user presses before it is cached) the device may
+        improvise locally (e.g. invert the button), which is outside this protocol.
       parameters:
         - name: device_id
           in: path
@@ -316,17 +341,28 @@ paths:
           in: query
           required: false
           description: >
-            Force raw framebuffer output even for devices with bit_depth > 4.
-            When false (default), devices with high bit depths receive PNG data.
+            When true, return packed raw framebuffer bytes instead of a PNG.
+            Applies to all bit_depth values. Default is false (PNG response).
           schema:
             type: boolean
             default: false
+        - name: strip
+          in: query
+          required: false
+          description: >
+            (optional, added in extension) Fetch only one button-label strip for
+            this frame, rendered with its buttons in the pressed visual state.
+            `top_pressed` returns the top strip (height = `top_strip_height`);
+            `bottom_pressed` returns the bottom strip (height = `bottom_strip_height`).
+            Omit to fetch the full frame.
+          schema:
+            type: string
+            enum: [top_pressed, bottom_pressed]
       responses:
         "200":
           description: >
-            Framebuffer data. Content-Type depends on device capabilities:
-            application/octet-stream for raw framebuffer (bit_depth 1-4),
-            image/png for higher bit depths or when raw=false.
+            Framebuffer data. Content-Type is image/png by default.
+            Returns application/octet-stream only when ?raw=true.
           content:
             application/octet-stream:
               schema:
@@ -391,8 +427,25 @@ paths:
       tags: [Instances, Frames]
       summary: Submit a new logical frame
       description: >
-        HLSS submits a newly rendered frame (PNG).
-        LLSS stores, diffs, and schedules device refreshes.
+        HLSS submits a newly rendered frame. HLSS renders EVERYTHING: the whole
+        display image (content + both button strips already drawn in) and,
+        optionally, the pressed-state versions of the strips. LLSS stores them and
+        serves them to the device (whole image on the normal frame fetch; pressed
+        strips via `GET /devices/{id}/frames/{frame_id}?strip=...`).
+
+
+        LLSS MAY diff successive frames internally (e.g. to skip pushing an
+        identical frame or to choose a refresh hint) but always serves whole
+        images — there is no region/partial transport on the device wire.
+
+
+        **Multipart parts:**
+
+        - `file` (required, image/png): the whole rendered display image.
+        - `top_pressed` (optional, added in extension, image/png): top strip
+          rendered with its buttons pressed. Height = device `top_strip_height`.
+        - `bottom_pressed` (optional, added in extension, image/png): bottom strip
+          rendered with its buttons pressed. Height = device `bottom_strip_height`.
       security:
         - InstanceAuth: []
       parameters:
@@ -404,10 +457,32 @@ paths:
       requestBody:
         required: true
         content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Whole rendered display image (content + strips), PNG.
+                top_pressed:
+                  type: string
+                  format: binary
+                  description: >
+                    (optional, added in extension) Top strip in pressed state, PNG.
+                bottom_pressed:
+                  type: string
+                  format: binary
+                  description: >
+                    (optional, added in extension) Bottom strip in pressed state, PNG.
           image/png:
             schema:
               type: string
               format: binary
+            description: >
+              Legacy single-image upload (no pressed strips). Equivalent to a
+              multipart body with only `file`.
       responses:
         "201":
           description: Frame accepted
@@ -828,16 +903,36 @@ components:
         bit_depth:
           type: integer
           description: >
-            Number of bits per pixel. Supported values:
-            - 1: Monochrome (1 bit per pixel). Frame size = width * height / 8 bytes.
-            - 2: 4-level grayscale. Frame is two concatenated 1-bit planes
-              (MSB plane first, then LSB plane). Frame size = width * height / 8 * 2 bytes.
-              Grayscale levels: 0b00=white, 0b01=light gray, 0b10=dark gray, 0b11=black.
+            Number of bits per pixel. Controls quantisation on the server.
+            The server returns a grayscale PNG by default; use ?raw=true for packed bytes.
+            - 1: Monochrome. PNG: 1-bit grayscale. Raw: width*height/8 bytes.
+            - 2: 4-level grayscale. PNG: L8 quantised to 4 levels (0/85/170/255).
+              Raw: two concatenated 1-bit planes, MSB then LSB. width*height/8*2 bytes.
+            - 4: 16-level grayscale. PNG: L8 quantised to 16 levels.
+              Raw: 4-bit packed, width*height/2 bytes.
+            - >4: Full-colour PNG (no conversion). Raw not applicable.
           example: 2
         partial_refresh:
           type: boolean
           default: false
           description: Whether the display supports partial refresh
+        top_strip_height:
+          type: integer
+          default: 0
+          description: >
+            (optional, added in extension) Height in pixels reserved at the TOP of
+            the display for the button-label strip. The server renders this strip
+            into the full frame image. The usable content area height is
+            `height - top_strip_height - bottom_strip_height`. 0 = no top strip.
+          example: 48
+        bottom_strip_height:
+          type: integer
+          default: 0
+          description: >
+            (optional, added in extension) Height in pixels reserved at the BOTTOM
+            of the display for the button-label strip. The server renders this strip
+            into the full frame image. 0 = no bottom strip.
+          example: 48
 
     DeviceStateResponse:
       type: object

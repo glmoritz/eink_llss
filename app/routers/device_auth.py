@@ -90,10 +90,18 @@ async def register_device(
     Register a new device.
 
     This is an UNAUTHENTICATED endpoint. When a new device registers:
-    1. If hardware_id already exists, return error
-    2. Create a new device record with PENDING status
-    3. Return device_id and device_secret
-    4. Device must wait for admin authorization before getting tokens
+    1. If hardware_id is new: create a record with PENDING status and
+       return device_id + device_secret.
+    2. If hardware_id is known and the record is still PENDING (never
+       authorized): rotate device_secret, refresh display capabilities,
+       return the existing device_id with the new secret.  This lets a
+       device that lost its NVS recover without admin intervention.
+       Nothing about the device record is load-bearing pre-authorization,
+       so rotating is safe.
+    3. If hardware_id is known and the record is AUTHORIZED, REJECTED, or
+       REVOKED: return 409 (opaque).  Returning the credentials here
+       would let anyone observing the hardware_id steal the device's
+       working identity.
 
     The device should store the device_secret securely (EEPROM/SPIFFS).
     """
@@ -103,6 +111,25 @@ async def register_device(
     )
 
     if existing:
+        if str(existing.auth_status) == DeviceAuthStatus.PENDING.value:
+            # Pre-authorization recovery path.
+            new_secret = secrets.token_urlsafe(32)
+            existing.device_secret = new_secret
+            existing.firmware_version = registration.firmware_version
+            existing.display_width = registration.display.width
+            existing.display_height = registration.display.height
+            existing.display_bit_depth = registration.display.bit_depth
+            existing.display_partial_refresh = registration.display.partial_refresh
+            db.commit()
+            db.refresh(existing)
+            return DeviceRegistrationResponse(
+                device_id=str(existing.device_id),
+                device_secret=new_secret,
+                auth_status=DeviceAuthStatus.PENDING.value,
+                message="Device re-registered (still pending authorization).",
+            )
+
+        # Authorized / rejected / revoked — refuse with an opaque 409.
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Device with hardware_id '{registration.hardware_id}' already registered",
@@ -197,6 +224,24 @@ async def authenticate_device(
     # Update firmware version if changed
     if str(device.firmware_version) != auth_request.firmware_version:
         device.firmware_version = auth_request.firmware_version  # type: ignore[assignment]
+        db.commit()
+
+    # Update display params if the device now reports different ones (e.g. after
+    # a re-flash that changes bit depth). The device is the authority on its own
+    # panel; without this an already-authorized row stays frozen at whatever it
+    # first registered with, and ?raw=true would serve a buffer the firmware
+    # can't consume.
+    disp = auth_request.display
+    if (
+        device.display_width != disp.width
+        or device.display_height != disp.height
+        or device.display_bit_depth != disp.bit_depth
+        or device.display_partial_refresh != disp.partial_refresh
+    ):
+        device.display_width = disp.width
+        device.display_height = disp.height
+        device.display_bit_depth = disp.bit_depth
+        device.display_partial_refresh = disp.partial_refresh
         db.commit()
 
     # Check authorization status

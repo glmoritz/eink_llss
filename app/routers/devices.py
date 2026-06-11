@@ -104,7 +104,11 @@ async def register_device(
     )
 
 
-@router.get("/{device_id}/state", response_model=DeviceStateResponse)
+@router.get(
+    "/{device_id}/state",
+    response_model=DeviceStateResponse,
+    response_model_exclude_none=True,
+)
 async def get_device_state(
     device_id: str,
     last_frame_id: Optional[str] = None,
@@ -242,28 +246,25 @@ async def get_frame(
     device_id: str,
     frame_id: str,
     raw: bool = False,
+    pattern: bool = False,
     _: str = Depends(get_current_device),
     db: Session = Depends(get_db),
 ) -> Response:
     """
     Fetch rendered frame data.
 
-    Returns framebuffer data appropriate for the device's display capabilities.
+    By default always returns a PNG image:
+    - bit_depth=1: 1-bit grayscale PNG (threshold at 128)
+    - bit_depth=2: 8-bit grayscale PNG quantized to 4 levels (0, 85, 170, 255)
+    - bit_depth=4: 8-bit grayscale PNG quantized to 16 levels
+    - bit_depth>4: full PNG as stored (no conversion)
 
-    For devices with bit_depth 1-4, returns raw framebuffer data:
+    Use ?raw=true to receive packed raw framebuffer bytes (application/octet-stream):
     - bit_depth=1: 1-bit packed monochrome (width*height/8 bytes)
-    - bit_depth=2: Two concatenated 1-bit planes for 2-bit grayscale
-      (MSB plane first for EPD register 0x24, LSB plane for 0x26)
+    - bit_depth=2: Two concatenated 1-bit planes (MSB plane for 0x24, LSB for 0x26)
     - bit_depth=4: 4-bit packed grayscale (width*height/2 bytes)
-
-    For devices with bit_depth > 4 or when raw=False, returns PNG image.
-
-    Args:
-        device_id: The device ID.
-        frame_id: The frame ID to fetch.
-        raw: Force raw framebuffer output even for higher bit depths.
     """
-    from frame_converter import convert_png_to_framebuffer
+    from frame_converter import convert_png_to_framebuffer, convert_png_to_quantized_png
 
     frame = db.query(Frame).filter(Frame.frame_id == frame_id).first()
 
@@ -287,8 +288,23 @@ async def get_frame(
     display_width = device.display_width
     display_height = device.display_height
 
-    # For low bit depths (1, 2, 4) or when raw is requested, convert to framebuffer
-    if bit_depth <= 4 or raw:
+    if pattern:
+        # TEMPORARY: deterministic self-test pattern instead of real content.
+        # Byte-for-byte identical to firmware src/pattern_check.c. Only the
+        # 1bpp packed form is implemented (the firmware test path).
+        from frame_converter import pattern_framebuffer_1bpp
+
+        logger.info(
+            f"Serving SELF-TEST pattern for {device_id} "
+            f"({display_width}x{display_height}, 1bpp)"
+        )
+        return Response(
+            content=pattern_framebuffer_1bpp(display_width, display_height),
+            media_type="application/octet-stream",
+        )
+
+    if raw:
+        # Return packed raw framebuffer bytes
         try:
             framebuffer_data, media_type = convert_png_to_framebuffer(
                 png_data=frame.data,
@@ -301,24 +317,37 @@ async def get_frame(
                 media_type=media_type,
             )
         except Exception as e:
-            logger.warning(f"Failed to convert frame to bit_depth={bit_depth}: {e}")
-            # Fall back to PNG on conversion error
+            logger.warning(f"Failed to convert frame to raw bit_depth={bit_depth}: {e}")
             return Response(
-                content=frame.data,
-                media_type="image/png",
+                content=b"",
+                media_type="application/octet-stream",
             )
 
-    # For higher bit depths without raw flag, return PNG
-    return Response(
-        content=frame.data,
-        media_type="image/png",
-    )
+    # Default: return PNG (quantized for bit_depth <= 4, as-is for higher)
+    try:
+        png_data = convert_png_to_quantized_png(
+            png_data=frame.data,
+            target_bit_depth=bit_depth,
+            expected_width=display_width,
+            expected_height=display_height,
+        )
+        return Response(
+            content=png_data,
+            media_type="image/png",
+        )
+    except Exception as e:
+        logger.warning(f"Failed to quantize PNG for bit_depth={bit_depth}: {e}")
+        return Response(
+            content=frame.data,
+            media_type="image/png",
+        )
 
 
 @router.post(
     "/{device_id}/inputs",
     response_model=InputProcessResponse,
     status_code=200,
+    response_model_exclude_none=True,
 )
 async def submit_input(
     device_id: str,

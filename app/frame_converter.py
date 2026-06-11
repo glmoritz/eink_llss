@@ -74,8 +74,12 @@ def convert_to_1bit_packed(image: Image.Image) -> bytes:
     """
     Convert grayscale image to 1-bit packed format.
 
-    Each byte contains 8 packed pixels (MSB = leftmost pixel).
-    Threshold at 128: values >= 128 become 1 (white), < 128 become 0 (black).
+    Each byte contains 8 packed pixels (MSB = leftmost pixel), bit 1 = white.
+
+    The image is Floyd-Steinberg dithered down to pure black/white rather than
+    hard-thresholded: on a 1bpp mono e-Ink panel the apparent shade comes from
+    the dot pattern, so dithering preserves gradients that a 128 threshold would
+    flatten. The device must NOT re-dither this output (driver dither=false).
 
     Args:
         image: PIL grayscale image.
@@ -84,7 +88,10 @@ def convert_to_1bit_packed(image: Image.Image) -> bytes:
         Packed 1-bit framebuffer data.
     """
     width, height = image.size
-    pixels = _get_pixel_data(image)
+
+    # PIL "1" mode applies Floyd-Steinberg dithering by default, yielding 0/255.
+    bw = image.convert("1")
+    pixels = list(bw.getdata())
 
     # Calculate packed size (8 pixels per byte)
     packed_size = (width * height + 7) // 8
@@ -94,8 +101,8 @@ def convert_to_1bit_packed(image: Image.Image) -> bytes:
         byte_idx = i // 8
         bit_idx = 7 - (i % 8)  # MSB first
 
-        # Threshold: >= 128 is white (1), < 128 is black (0)
-        if pixel >= 128:
+        # Dithered output is 0 (black) or 255 (white); white -> bit 1.
+        if pixel:
             packed[byte_idx] |= 1 << bit_idx
 
     return bytes(packed)
@@ -245,9 +252,87 @@ def convert_png_to_framebuffer(
         raise ValueError(f"Unsupported bit depth: {target_bit_depth}")
 
 
-def get_expected_framebuffer_size(
-    width: int, height: int, bit_depth: int
-) -> int:
+def convert_to_quantized_png(image: Image.Image, target_bit_depth: int) -> bytes:
+    """
+    Convert grayscale image to a quantized PNG for the target bit depth.
+
+    - bit_depth=1: 1-bit grayscale PNG (threshold at 128)
+    - bit_depth=2: 8-bit grayscale PNG quantized to 4 levels (0, 85, 170, 255)
+    - bit_depth=4: 8-bit grayscale PNG quantized to 16 levels
+
+    Args:
+        image: PIL grayscale image.
+        target_bit_depth: Target bit depth (1, 2, or 4).
+
+    Returns:
+        PNG image data as bytes.
+    """
+    if target_bit_depth == 1:
+        # Threshold at 128, save as 1-bit PNG
+        quantized = image.point(lambda p: 255 if p >= 128 else 0).convert("1")
+    elif target_bit_depth in (2, 4):
+        levels = 1 << target_bit_depth  # 4 or 16
+        max_level = levels - 1
+        quantized = image.point(
+            lambda p: round(round(p * max_level / 255) * 255 / max_level)
+        )
+    else:
+        quantized = image
+
+    buf = io.BytesIO()
+    quantized.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def convert_png_to_quantized_png(
+    png_data: bytes,
+    target_bit_depth: int,
+    expected_width: Optional[int] = None,
+    expected_height: Optional[int] = None,
+) -> bytes:
+    """
+    Convert PNG image data to a quantized PNG appropriate for the given bit depth.
+
+    - bit_depth=1: 1-bit grayscale PNG (threshold at 128)
+    - bit_depth=2: 8-bit grayscale PNG quantized to 4 levels (0, 85, 170, 255)
+    - bit_depth=4: 8-bit grayscale PNG quantized to 16 levels
+    - bit_depth>4: returned as-is (no conversion)
+
+    Args:
+        png_data: Raw PNG image data from HLSS.
+        target_bit_depth: Target display bit depth (1, 2, 4, or 8+).
+        expected_width: Expected display width (for validation/resize).
+        expected_height: Expected display height (for validation/resize).
+
+    Returns:
+        PNG image data as bytes.
+
+    Raises:
+        ValueError: If conversion fails.
+    """
+    if target_bit_depth > 4:
+        return png_data
+
+    try:
+        image, width, height = png_to_grayscale(png_data)
+    except Exception as e:
+        logger.error(f"Failed to load PNG data: {e}")
+        raise ValueError(f"Invalid PNG data: {e}")
+
+    if expected_width and expected_height:
+        if width != expected_width or height != expected_height:
+            logger.warning(
+                f"Frame size {width}x{height} doesn't match display "
+                f"{expected_width}x{expected_height}, resizing"
+            )
+            image = image.resize(
+                (expected_width, expected_height), Image.Resampling.LANCZOS
+            )
+
+    return convert_to_quantized_png(image, target_bit_depth)
+
+
+def get_expected_framebuffer_size(width: int, height: int, bit_depth: int) -> int:
     """
     Calculate the expected framebuffer size for given dimensions and bit depth.
 
@@ -272,3 +357,48 @@ def get_expected_framebuffer_size(
         return total_pixels
     else:
         raise ValueError(f"Unsupported bit depth: {bit_depth}")
+
+
+# ---------------------------------------------------------------------------
+# Deterministic frame self-test pattern (TEMPORARY debugging aid).
+#
+# Served when the device requests ?raw=true&pattern=1 (firmware build with
+# CONFIG_LLSS_PATTERN_TEST=y). The byte stream MUST stay identical to the C
+# implementation in firmware src/pattern_check.c (pattern_expected_byte):
+# integer-only math, MSB-first packing, bit 1 = white.
+# ---------------------------------------------------------------------------
+def _pattern_pixel(x: int, y: int, width: int, height: int) -> int:
+    """1 = white, 0 = black. Keep in lockstep with C pattern_pixel()."""
+    if x == 0 or x == width - 1 or y == 0 or y == height - 1:
+        return 1  # border
+    if x < 64 and y < 64:
+        return 1  # solid top-left square
+    if y < 24:
+        return 1  # thick top stripe
+    if y == (x * (height - 1)) // (width - 1):
+        return 1  # TL->BR diagonal
+    if (y % 40) == 0:
+        return 1  # horizontal ruler ticks
+    return 0
+
+
+def pattern_framebuffer_1bpp(width: int = 800, height: int = 480) -> bytes:
+    """
+    Generate the deterministic 1bpp packed self-test pattern.
+
+    MSB = leftmost pixel, bit 1 = white. Output is (width//8)*height bytes
+    (48000 for 800x480), matching convert_to_1bit_packed()'s contract.
+    """
+    stride = width // 8
+    packed = bytearray(stride * height)
+
+    for y in range(height):
+        for b in range(stride):
+            v = 0
+            for k in range(8):
+                x = b * 8 + k
+                if _pattern_pixel(x, y, width, height):
+                    v |= 1 << (7 - k)
+            packed[y * stride + b] = v
+
+    return bytes(packed)

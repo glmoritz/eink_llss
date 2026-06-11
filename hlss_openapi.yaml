@@ -36,7 +36,10 @@ paths:
         
         **Callback requirements**
         - `callbacks.frames` points to LLSS `POST /instances/{instance_id}/frames`.
-          HLSS must upload a PNG as `multipart/form-data` with a file field named `file`.
+          HLSS must upload the whole rendered image as `multipart/form-data` with a
+          file field named `file`. HLSS MAY also include `top_pressed` and
+          `bottom_pressed` parts (optional, added in extension) — the strips
+          rendered with their buttons pressed, for device-side press feedback.
       requestBody:
         required: true
         content:
@@ -215,6 +218,18 @@ components:
         display:
           type: object
           required: [width, height, bit_depth]
+          description: >
+            Display contract. HLSS renders the WHOLE image at width×height,
+            drawing the button strips into the reserved top/bottom bands and the
+            app content in the band between them. HLSS also renders the pressed-
+            state strips (uploaded as `top_pressed`/`bottom_pressed`).
+
+
+            **Button grid (fixed contract):** 8 button slots along the bottom strip
+            (BTN_1..BTN_8, left→right) and 8 slots along the top strip, of which
+            only the outer two on each side are usable (slots 1–2 and 7–8 = the 4
+            user buttons ENTER/ESC/HL_LEFT/HL_RIGHT); the middle 4 top slots are not
+            usable and should be left blank.
           properties:
             width:
               type: integer
@@ -222,6 +237,18 @@ components:
               type: integer
             bit_depth:
               type: integer
+            top_strip_height:
+              type: integer
+              default: 0
+              description: >
+                (optional, added in extension) Pixels reserved at the top for the
+                button strip. Content band height = height − top − bottom.
+            bottom_strip_height:
+              type: integer
+              default: 0
+              description: >
+                (optional, added in extension) Pixels reserved at the bottom for the
+                button strip.
 
     InstanceInitResponse:
       type: object

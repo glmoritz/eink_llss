@@ -10,7 +10,7 @@ import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 
 from database import init_db
 from routers import (
@@ -46,14 +46,21 @@ It manages authentication, frame storage, diffing, and device orchestration.
     lifespan=lifespan,
 )
 
-# Include routers
-app.include_router(admin_router)
-app.include_router(debug_router)
-app.include_router(device_auth_router)
-app.include_router(devices_router)
-app.include_router(instances_router)
+# All public API routes live under /api so the URL surface matches the
+# OpenAPI `servers` declaration above and the client's CONFIG_LLSS_SERVER_URL.
+# Wrap every existing router so individual prefixes (/auth, /devices, ...)
+# stay intact and become /api/auth, /api/devices, etc.
+api_router = APIRouter(prefix="/api")
+api_router.include_router(admin_router)
+api_router.include_router(debug_router)
+api_router.include_router(device_auth_router)
+api_router.include_router(devices_router)
+api_router.include_router(instances_router)
+app.include_router(api_router)
 
 
+# /health stays at the root so reverse-proxy / load-balancer probes don't
+# need to know about the /api prefix.
 @app.get("/health", tags=["Health"])
 async def health_check() -> dict:
     """Health check endpoint."""

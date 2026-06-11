@@ -34,6 +34,14 @@ LLSS_SERVICE_ID = os.getenv("LLSS_SERVICE_ID", "llss_orchestrator")
 HLSS_JWT_CACHE_SKEW_SECONDS = int(os.getenv("HLSS_JWT_CACHE_SKEW_SECONDS", "60"))
 
 
+def _normalize_llss_api_base_url(base_url: str) -> str:
+    """Ensure callback URLs target the public /api route prefix exactly once."""
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/api"):
+        return normalized
+    return f"{normalized}/api"
+
+
 class HLSSService:
     """Service for communicating with HLSS backends."""
 
@@ -87,10 +95,11 @@ class HLSSService:
 
     def _get_callbacks(self, instance_id: str) -> HLSSCallbacks:
         """Generate callback URLs for an instance."""
+        callback_base_url = _normalize_llss_api_base_url(self.llss_base_url)
         return HLSSCallbacks(
-            frames=f"{self.llss_base_url}/instances/{instance_id}/frames",
-            inputs=f"{self.llss_base_url}/instances/{instance_id}/inputs",
-            notify=f"{self.llss_base_url}/instances/{instance_id}/notify",
+            frames=f"{callback_base_url}/instances/{instance_id}/frames",
+            inputs=f"{callback_base_url}/instances/{instance_id}/inputs",
+            notify=f"{callback_base_url}/instances/{instance_id}/notify",
         )
 
     def _get_headers(self, content_type: bool = False) -> dict:
