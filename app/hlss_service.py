@@ -357,7 +357,7 @@ class HLSSService:
         self,
         instance_id: str,
         event: InputEvent,
-    ) -> Tuple[bool, Optional[str]]:
+    ) -> Tuple[bool, Optional[str], Optional[dict]]:
         """
         Forward an input event to an HLSS instance.
 
@@ -366,7 +366,10 @@ class HLSSService:
             event: The input event.
 
         Returns:
-            Tuple of (success, error_message)
+            Tuple of (success, error_message, hlss_response). hlss_response is
+            HLSS's parsed InputProcessResponse JSON (status / frame_id / ...).
+            HLSS renders synchronously, so a NEW_FRAME there lets the caller tell
+            the device to fetch immediately instead of re-polling.
         """
         input_url = f"{self.hlss_base_url}/instances/{instance_id}/inputs"
         headers = self._get_headers(content_type=True)
@@ -380,16 +383,23 @@ class HLSSService:
                 )
 
                 if response.status_code == 200:
-                    return True, None
+                    try:
+                        return True, None, response.json()
+                    except Exception:
+                        return True, None, None
                 else:
-                    return False, f"HLSS returned status {response.status_code}"
+                    return (
+                        False,
+                        f"HLSS returned status {response.status_code}",
+                        None,
+                    )
 
         except httpx.TimeoutException:
-            return False, "Timeout connecting to HLSS backend"
+            return False, "Timeout connecting to HLSS backend", None
         except httpx.RequestError as e:
-            return False, f"Connection error: {str(e)}"
+            return False, f"Connection error: {str(e)}", None
         except Exception as e:
-            return False, f"Unexpected error: {str(e)}"
+            return False, f"Unexpected error: {str(e)}", None
 
     async def trigger_render(
         self,

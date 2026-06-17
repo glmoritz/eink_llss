@@ -1233,6 +1233,22 @@ async def reauthorize_device(
     }
 
 
+@router.delete("/devices/{device_id}", status_code=204)
+async def delete_device(
+    device_id: str,
+    db: Session = Depends(get_db),
+) -> None:
+    """Delete a device so it can be registered again."""
+    device = db.query(Device).filter(Device.device_id == device_id).first()
+
+    if not device:
+        raise HTTPException(status_code=404, detail=f"Device '{device_id}' not found")
+
+    device.active_instance_id = None
+    db.delete(device)
+    db.commit()
+
+
 # ============================================================
 # System Status
 # ============================================================
@@ -1649,16 +1665,17 @@ async def admin_dashboard(request: Request) -> HTMLResponse:
         }}
 
         function getDeviceActions(d) {{
+            const deleteButton = `<button class="btn btn-danger btn-small" onclick="deleteDevice('${{d.device_id}}','${{d.hardware_id}}')">🗑️</button>`;
             if (d.auth_status === 'pending') {{
-                return `<button class="btn btn-success btn-small" onclick="authorizeDevice('${{d.device_id}}')">✅</button><button class="btn btn-danger btn-small" onclick="rejectDevice('${{d.device_id}}')">✖️</button>`;
+                return `<button class="btn btn-success btn-small" onclick="authorizeDevice('${{d.device_id}}')">✅</button><button class="btn btn-danger btn-small" onclick="rejectDevice('${{d.device_id}}')">✖️</button>${{deleteButton}}`;
             }}
             if (d.auth_status === 'authorized') {{
-                return `<button class="btn btn-danger btn-small" onclick="revokeDevice('${{d.device_id}}')">⛔</button>`;
+                return `<button class="btn btn-danger btn-small" onclick="revokeDevice('${{d.device_id}}')">⛔</button>${{deleteButton}}`;
             }}
             if (d.auth_status === 'rejected' || d.auth_status === 'revoked') {{
-                return `<button class="btn btn-success btn-small" onclick="reauthorizeDevice('${{d.device_id}}')">♻️</button>`;
+                return `<button class="btn btn-success btn-small" onclick="reauthorizeDevice('${{d.device_id}}')">♻️</button>${{deleteButton}}`;
             }}
-            return '';
+            return deleteButton;
         }}
 
         function renderDevices() {{
@@ -1736,6 +1753,7 @@ async def admin_dashboard(request: Request) -> HTMLResponse:
         async function rejectDevice(id) {{ if (!confirm('Reject this device?')) return; try {{ await apiCall(`/admin/devices/${{id}}/reject`, 'POST'); showToast('Device rejected'); loadDevices(); loadStats(); }} catch (e) {{ showToast(e.message, true); }} }}
         async function revokeDevice(id) {{ if (!confirm('Revoke device access?')) return; try {{ await apiCall(`/admin/devices/${{id}}/revoke`, 'POST'); showToast('Device revoked'); loadDevices(); loadStats(); }} catch (e) {{ showToast(e.message, true); }} }}
         async function reauthorizeDevice(id) {{ try {{ await apiCall(`/admin/devices/${{id}}/reauthorize`, 'POST'); showToast('Device re-authorized'); loadDevices(); loadStats(); }} catch (e) {{ showToast(e.message, true); }} }}
+        async function deleteDevice(id, hardwareId) {{ if (!confirm(`Delete device "${{hardwareId}}"? It will need to register again.`)) return; try {{ await apiCall(`/admin/devices/${{id}}`, 'DELETE'); showToast('Device deleted'); loadDevices(); loadStats(); }} catch (e) {{ showToast(e.message, true); }} }}
         function copyToken(t) {{ if (!t) return; navigator.clipboard.writeText(t).then(() => showToast('Token copied')).catch(() => showToast('Copy failed', true)); }}
     </script>
 </body>

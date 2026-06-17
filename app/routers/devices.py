@@ -406,13 +406,35 @@ async def submit_input(
     # Forward to active HLSS instance
     active_instance_id = cast(Optional[str], device.active_instance_id)
     if active_instance_id:
-        success, error = await _forward_input_to_hlss(db, active_instance_id, event)
+        success, error, hlss_resp = await _forward_input_to_hlss(
+            db, active_instance_id, event
+        )
         if not success:
             return InputProcessResponse(
                 status=InputProcessStatus.ERROR,
                 message=error or "Failed to forward input to HLSS",
             )
 
+        # HLSS renders synchronously and reports the outcome directly — use it
+        # so the device can chain a fetch immediately instead of re-polling.
+        if hlss_resp:
+            hlss_status = hlss_resp.get("status")
+            hlss_frame_id = hlss_resp.get("frame_id")
+            if hlss_status == InputProcessStatus.NEW_FRAME.value and hlss_frame_id:
+                return InputProcessResponse(
+                    status=InputProcessStatus.NEW_FRAME,
+                    frame_id=hlss_frame_id,
+                    message="Input processed",
+                )
+            if hlss_status == InputProcessStatus.NO_CHANGE.value:
+                return InputProcessResponse(
+                    status=InputProcessStatus.NO_CHANGE,
+                    message="Input processed; no change",
+                )
+
+    # Fallback: detect a frame committed via the frame-submit callback
+    # (refresh first to avoid a stale cached read from this session).
+    db.refresh(device)
     current_frame_id = cast(Optional[str], device.current_frame_id)
     if current_frame_id and current_frame_id != previous_frame_id:
         return InputProcessResponse(
@@ -496,12 +518,17 @@ async def _forward_input_to_hlss(
     db: Session,
     instance_id: str,
     event: InputEventSchema,
-) -> tuple[bool, Optional[str]]:
-    """Forward an input event to the HLSS backend."""
+) -> tuple[bool, Optional[str], Optional[dict]]:
+    """Forward an input event to the HLSS backend.
+
+    Returns (success, error, hlss_response) where hlss_response is HLSS's parsed
+    InputProcessResponse (status / frame_id). HLSS renders synchronously, so a
+    NEW_FRAME there lets the device chain an immediate fetch.
+    """
     # Get instance and its HLSS type
     instance = db.query(Instance).filter(Instance.instance_id == instance_id).first()
     if not instance or not instance.hlss_type_id:
-        return False, "Instance or HLSS type not configured"
+        return False, "Instance or HLSS type not configured", None
 
     hlss_type = (
         db.query(HLSSTypeModel)
@@ -510,20 +537,20 @@ async def _forward_input_to_hlss(
     )
 
     if not hlss_type or not hlss_type.is_active:
-        return False, "HLSS type is not active"
+        return False, "HLSS type is not active", None
 
     # Forward the input event
     try:
         llss_base_url = _get_llss_base_url()
         service = HLSSService.from_hlss_type(hlss_type, llss_base_url)
-        success, error = await service.forward_input(
+        success, error, hlss_resp = await service.forward_input(
             instance_id=instance_id,
             event=event,
         )
         if not success:
             logger.warning(f"Failed to forward input to HLSS: {error}")
-            return False, error or "Failed to forward input to HLSS"
-        return True, None
+            return False, error or "Failed to forward input to HLSS", None
+        return True, None, hlss_resp
     except Exception as e:
         logger.error(f"Error forwarding input to HLSS: {e}")
-        return False, "Error forwarding input to HLSS"
+        return False, "Error forwarding input to HLSS", None
