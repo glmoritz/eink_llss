@@ -1577,7 +1577,7 @@ async def admin_dashboard(request: Request) -> HTMLResponse:
     </div>
     <div class="toast" id="toast"></div>
     <script>
-        const BASE_URL = '{base_url}/api';
+        const BASE_URL = window.location.origin + '/api';
         let hlssTypes = [], instances = [], devices = [];
 
         document.addEventListener('DOMContentLoaded', () => {{
