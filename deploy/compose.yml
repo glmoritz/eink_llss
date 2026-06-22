@@ -33,6 +33,18 @@ services:
       - "traefik.http.routers.eink.tls=true"
       - "traefik.http.routers.eink.tls.options=embedded-debug@file"
       - "traefik.http.services.eink.loadbalancer.server.port=80"
+      # BasicAuth on the admin/debug surface only (single user moritz). The
+      # eink-admin router carries a higher priority + the auth middleware for
+      # these paths; the catch-all eink router above still serves the device
+      # (token-authed) for everything else. bcrypt hash, $ escaped as $$.
+      - "traefik.http.middlewares.eink-auth.basicauth.users=moritz:$$2b$$05$$ncwVwePW0ykR4ewkwwJppuf34Yf01V97F656oqHcaGxy7WGtNq8GG"
+      - "traefik.http.routers.eink-admin.rule=Host(`eink.tutu.eng.br`) && (PathPrefix(`/api/admin`) || PathPrefix(`/api/debug`) || PathPrefix(`/docs`) || PathPrefix(`/redoc`) || Path(`/openapi.json`))"
+      - "traefik.http.routers.eink-admin.entrypoints=websecure"
+      - "traefik.http.routers.eink-admin.tls=true"
+      - "traefik.http.routers.eink-admin.tls.options=embedded-debug@file"
+      - "traefik.http.routers.eink-admin.priority=100"
+      - "traefik.http.routers.eink-admin.service=eink"
+      - "traefik.http.routers.eink-admin.middlewares=eink-auth"
 
 networks:
   internal_containers:
