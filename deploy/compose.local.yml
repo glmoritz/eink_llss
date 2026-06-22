@@ -1,0 +1,19 @@
+# LLSS debug deployment.
+#   Build : docker compose -f deploy/docker-compose.yml build
+#   Run   : docker compose -f deploy/docker-compose.yml up -d
+#
+# Uses host networking (like the dev container's --network=host) so the service
+# binds :8008 directly on the host, resolves postgres.tutu.lan, and is reachable
+# by HLSS / the device at pccasa.tutu.lan:8008. Config comes from the repo .env.
+name: eink-llss
+services:
+  llss:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: eink-llss:debug
+    container_name: eink-llss
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    network_mode: host
