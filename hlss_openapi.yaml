@@ -225,11 +225,29 @@ components:
             state strips (uploaded as `top_pressed`/`bottom_pressed`).
 
 
-            **Button grid (fixed contract):** 8 button slots along the bottom strip
-            (BTN_1..BTN_8, left→right) and 8 slots along the top strip, of which
-            only the outer two on each side are usable (slots 1–2 and 7–8 = the 4
-            user buttons ENTER/ESC/HL_LEFT/HL_RIGHT); the middle 4 top slots are not
-            usable and should be left blank.
+            **Button grid (fixed contract):** Both strips are 8 slots wide,
+            numbered left → right.
+
+            Bottom strip (btn1..btn8 = slot 0..7) maps 1:1 to BTN_1..BTN_8 —
+            every slot can be a pressable button.
+
+            Top strip (btn9..btn16 = slot 0..7) carries device-local keys
+            for the leftmost slots and the four HLSS-mapped user buttons
+            on the right:
+
+              - slot 0 (btn9)  : no hardware, never pressed
+              - slot 1 (btn10) : LOCAL menu trigger (device-side overlay)
+              - slot 2 (btn11) : local-only, free for app rendering
+              - slot 3 (btn12) : local-only, free for app rendering
+              - slot 4 (btn13) : HL_LEFT
+              - slot 5 (btn14) : HL_RIGHT
+              - slot 6 (btn15) : ENTER
+              - slot 7 (btn16) : ESC
+
+            Local-only keys (btn10..btn12) never reach HLSS; HLSS draws
+            those slots however it likes (typically slot 1 hosts a small
+            menu-affordance icon, slots 2-3 hold the screen title). Only
+            slots 4-7 receive HLSS-relayed press events.
           properties:
             width:
               type: integer
