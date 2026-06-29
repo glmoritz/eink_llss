@@ -313,19 +313,14 @@ paths:
         the server will automatically resize the image.
 
 
-        **Full frame (default):** the returned image is the complete display,
-        with the top and bottom button-label strips already rendered into it
-        (see `top_strip_height` / `bottom_strip_height` in DisplayCapabilities).
-        The device blits the whole image and refreshes.
+        **Full frame:** the returned image is the complete display, with the top
+        and bottom button-label strips already rendered into it (see
+        `top_strip_height` / `bottom_strip_height` in DisplayCapabilities). The
+        device blits the whole image and refreshes.
 
 
-        **Pressed strip (optional, added in extension):** use `?strip=top_pressed`
-        or `?strip=bottom_pressed` to fetch just that strip rendered with its
-        buttons in the *pressed* visual state, for local press feedback. The device
-        MAY cache this and, on a button press, blit the pressed slice over the
-        current image without a server round-trip. This is purely optional — if the
-        device skips it (or the user presses before it is cached) the device may
-        improvise locally (e.g. invert the button), which is outside this protocol.
+        Pressed-state strips (for local press feedback) are fetched separately
+        from `GET /devices/{device_id}/strips/{strip_id}` — see that endpoint.
       parameters:
         - name: device_id
           in: path
@@ -346,18 +341,6 @@ paths:
           schema:
             type: boolean
             default: false
-        - name: strip
-          in: query
-          required: false
-          description: >
-            (optional, added in extension) Fetch only one button-label strip for
-            this frame, rendered with its buttons in the pressed visual state.
-            `top_pressed` returns the top strip (height = `top_strip_height`);
-            `bottom_pressed` returns the bottom strip (height = `bottom_strip_height`).
-            Omit to fetch the full frame.
-          schema:
-            type: string
-            enum: [top_pressed, bottom_pressed]
       responses:
         "200":
           description: >
@@ -372,6 +355,77 @@ paths:
               schema:
                 type: string
                 format: binary
+
+  /devices/{device_id}/strips/{strip_id}:
+    get:
+      tags: [Devices, Frames]
+      summary: Fetch a pressed-state button strip (content-addressable)
+      description: >
+        Returns one pressed-state button-label strip (top or bottom) rendered
+        with its buttons in the pressed visual state, for local device-side
+        press feedback. Strips are content-addressable: `strip_id` is an opaque
+        token (≤32 chars) computed by LLSS from the strip bytes at upload time.
+
+
+        The current strip ids for the active frame are advertised by LLSS in
+        `DeviceStateResponse.top_strip_id` / `bottom_strip_id` and in
+        `InputProcessResponse.top_strip_id` / `bottom_strip_id`. A device that
+        sees an unknown id MAY prefetch the strip in the background; on a
+        button press it MAY blit the pressed strip over the current image as
+        local feedback while waiting for the next full frame.
+
+
+        Strips are immutable for a given id and safe to cache on the device
+        keyed by `strip_id`. The endpoint is purely optional — a device that
+        does not implement press feedback never calls it.
+
+
+        Returns 404 if the id is unknown to the server (e.g. evicted, or the
+        active HLSS instance did not upload pressed strips). The device must
+        treat 404 as "no press feedback available" and fall back to local
+        improvisation (e.g. invert the pressed slot).
+
+
+        The strip width matches the device display `width`; the height is the
+        device-declared `top_strip_height` or `bottom_strip_height` for the
+        respective band. Encoding follows the same bit_depth/raw rules as the
+        full frame endpoint.
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: strip_id
+          in: path
+          required: true
+          description: Opaque content-hash token for the strip (LLSS-assigned).
+          schema:
+            type: string
+            maxLength: 32
+        - name: raw
+          in: query
+          required: false
+          description: >
+            When true, return packed raw framebuffer bytes instead of a PNG.
+            Same semantics as the full-frame endpoint.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Pressed-state strip image.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Strip id unknown to the server.
 
   /devices/{device_id}/inputs:
     post:
@@ -429,9 +483,16 @@ paths:
       description: >
         HLSS submits a newly rendered frame. HLSS renders EVERYTHING: the whole
         display image (content + both button strips already drawn in) and,
-        optionally, the pressed-state versions of the strips. LLSS stores them and
-        serves them to the device (whole image on the normal frame fetch; pressed
-        strips via `GET /devices/{id}/frames/{frame_id}?strip=...`).
+        optionally, the pressed-state versions of the strips. LLSS stores them
+        and serves them to the device (whole image on the normal frame fetch;
+        pressed strips via `GET /devices/{device_id}/strips/{strip_id}`).
+
+
+        For each pressed strip part received, LLSS computes a content-hash
+        `strip_id` (opaque token, ≤32 chars) and advertises it to the device in
+        the next `DeviceStateResponse` (or `InputProcessResponse`). Identical
+        strips across successive frames yield the same id, so the device can
+        cache by id and skip re-fetching.
 
 
         LLSS MAY diff successive frames internally (e.g. to skip pushing an
@@ -959,6 +1020,23 @@ components:
           type: integer
           description: Suggested interval before next poll (milliseconds)
           example: 5000
+        top_strip_id:
+          type: string
+          nullable: true
+          maxLength: 32
+          description: >
+            (optional, added in extension) Content-hash id for the pressed-state
+            top button strip belonging to the current frame. Omitted/null when
+            the active instance did not upload one. Fetch with
+            `GET /devices/{device_id}/strips/{strip_id}`; safe to cache by id.
+        bottom_strip_id:
+          type: string
+          nullable: true
+          maxLength: 32
+          description: >
+            (optional, added in extension) Content-hash id for the pressed-state
+            bottom button strip belonging to the current frame. Same semantics
+            as `top_strip_id`.
 
     # ============================================================
     # Input Schemas
@@ -1017,6 +1095,22 @@ components:
           type: string
           nullable: true
           description: Optional info or error message
+        top_strip_id:
+          type: string
+          nullable: true
+          maxLength: 32
+          description: >
+            (optional, added in extension) Same semantics as
+            `DeviceStateResponse.top_strip_id` — content-hash id for the
+            pressed-state top strip of the resulting frame.
+        bottom_strip_id:
+          type: string
+          nullable: true
+          maxLength: 32
+          description: >
+            (optional, added in extension) Same semantics as
+            `DeviceStateResponse.bottom_strip_id` — content-hash id for the
+            pressed-state bottom strip of the resulting frame.
 
     # ============================================================
     # Instance Schemas

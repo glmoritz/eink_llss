@@ -20,6 +20,7 @@ from db_models import (
     Frame,
     InputEvent,
     Instance,
+    Strip,
 )
 from db_models import HLSSType as HLSSTypeModel
 from dependencies import get_current_device
@@ -43,6 +44,24 @@ logger = logging.getLogger(__name__)
 def _get_llss_base_url() -> str:
     """Get the base URL of the LLSS API from environment."""
     return os.getenv("LLSS_BASE_URL", "http://localhost:8000")
+
+
+def _strip_ids_for_frame(
+    db: Session, frame_id: Optional[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """Look up the pressed-strip ids HLSS uploaded with a given frame.
+    Returned to the device alongside any FETCH_FRAME / NEW_FRAME action so
+    it can populate the press-feedback cache without an extra round trip."""
+    if not frame_id:
+        return None, None
+    frame = (
+        db.query(Frame.top_strip_id, Frame.bottom_strip_id)
+        .filter(Frame.frame_id == frame_id)
+        .first()
+    )
+    if not frame:
+        return None, None
+    return frame.top_strip_id, frame.bottom_strip_id
 
 
 @router.post(
@@ -141,29 +160,41 @@ async def get_device_state(
 
     # Check if there's a new frame already cached
     if current_frame_id and current_frame_id != last_frame_id:
+        top_strip_id, bottom_strip_id = _strip_ids_for_frame(db, current_frame_id)
         return DeviceStateResponse(
             action=DeviceAction.FETCH_FRAME,
             frame_id=current_frame_id,
             active_instance_id=active_instance_id,
             poll_after_ms=5000,
+            top_strip_id=top_strip_id,
+            bottom_strip_id=bottom_strip_id,
         )
 
     # Check HLSS for new frames if device has an active instance
     if active_instance_id:
         new_frame_id = await _check_hlss_for_new_frame(db, device, active_instance_id)
         if new_frame_id and new_frame_id != last_frame_id:
+            top_strip_id, bottom_strip_id = _strip_ids_for_frame(db, new_frame_id)
             return DeviceStateResponse(
                 action=DeviceAction.FETCH_FRAME,
                 frame_id=new_frame_id,
                 active_instance_id=active_instance_id,
                 poll_after_ms=5000,
+                top_strip_id=top_strip_id,
+                bottom_strip_id=bottom_strip_id,
             )
 
+    # NOOP: still advertise the strip ids of the frame the device already
+    # holds so a device that booted before strips landed can populate its
+    # cache on the next heartbeat.
+    top_strip_id, bottom_strip_id = _strip_ids_for_frame(db, last_frame_id)
     return DeviceStateResponse(
         action=DeviceAction.NOOP,
         frame_id=None,
         active_instance_id=active_instance_id,
         poll_after_ms=5000,
+        top_strip_id=top_strip_id,
+        bottom_strip_id=bottom_strip_id,
     )
 
 
@@ -343,6 +374,84 @@ async def get_frame(
         )
 
 
+@router.get("/{device_id}/strips/{strip_id}")
+async def get_strip(
+    device_id: str,
+    strip_id: str,
+    raw: bool = False,
+    _: str = Depends(get_current_device),
+    db: Session = Depends(get_db),
+) -> Response:
+    """
+    Fetch a pressed-state button strip (content-addressable).
+
+    Strips are immutable for a given id, so the device caches them
+    indefinitely keyed by ``strip_id``. The device discovers strip ids
+    through DeviceStateResponse / InputProcessResponse and only requests
+    ids it has not already cached.
+
+    Encoding follows the same rules as the full-frame endpoint:
+    PNG by default, raw=true returns the panel-native packed bytes at
+    the device's declared bit depth.
+
+    Returns 404 if the id is unknown to the server (evicted or the
+    instance never uploaded one). The device treats 404 as "no press
+    feedback available" and falls back to local invert.
+    """
+    from frame_converter import convert_png_to_framebuffer, convert_png_to_quantized_png
+
+    strip = db.query(Strip).filter(Strip.strip_id == strip_id).first()
+    if not strip or not strip.data:
+        raise HTTPException(status_code=404, detail="Strip not found")
+
+    device = db.query(Device).filter(Device.device_id == device_id).first()
+    if not device:
+        return Response(content=strip.data, media_type="image/png")
+
+    bit_depth = device.display_bit_depth or 4
+    display_width = device.display_width
+
+    if raw:
+        # Strip dimensions: width matches the device's display, height is
+        # the device-declared top_strip_height / bottom_strip_height. We
+        # convert against the strip's own height (decoded from PNG) so the
+        # raw output matches what the device's invert/merge pipeline expects.
+        try:
+            from PIL import Image
+            from io import BytesIO
+
+            img = Image.open(BytesIO(strip.data))
+            strip_height = img.height
+            framebuffer_data, media_type = convert_png_to_framebuffer(
+                png_data=strip.data,
+                target_bit_depth=bit_depth,
+                expected_width=display_width,
+                expected_height=strip_height,
+            )
+            return Response(content=framebuffer_data, media_type=media_type)
+        except Exception as e:
+            logger.warning(
+                f"Failed to convert strip to raw bit_depth={bit_depth}: {e}"
+            )
+            return Response(content=b"", media_type="application/octet-stream")
+
+    try:
+        from PIL import Image
+        from io import BytesIO
+
+        img = Image.open(BytesIO(strip.data))
+        png_data = convert_png_to_quantized_png(
+            png_data=strip.data,
+            target_bit_depth=bit_depth,
+            expected_width=display_width,
+            expected_height=img.height,
+        )
+        return Response(content=png_data, media_type="image/png")
+    except Exception as e:
+        logger.warning(f"Failed to quantize strip PNG for bit_depth={bit_depth}: {e}")
+        return Response(content=strip.data, media_type="image/png")
+
+
 @router.post(
     "/{device_id}/inputs",
     response_model=InputProcessResponse,
@@ -391,10 +500,15 @@ async def submit_input(
             db.commit()
             current_frame_id = cast(Optional[str], device.current_frame_id)
             if current_frame_id and current_frame_id != previous_frame_id:
+                top_strip_id, bottom_strip_id = _strip_ids_for_frame(
+                    db, current_frame_id
+                )
                 return InputProcessResponse(
                     status=InputProcessStatus.NEW_FRAME,
                     frame_id=current_frame_id,
                     message="Screen switch processed",
+                    top_strip_id=top_strip_id,
+                    bottom_strip_id=bottom_strip_id,
                 )
             return InputProcessResponse(
                 status=InputProcessStatus.NO_CHANGE,
@@ -421,10 +535,15 @@ async def submit_input(
             hlss_status = hlss_resp.get("status")
             hlss_frame_id = hlss_resp.get("frame_id")
             if hlss_status == InputProcessStatus.NEW_FRAME.value and hlss_frame_id:
+                top_strip_id, bottom_strip_id = _strip_ids_for_frame(
+                    db, hlss_frame_id
+                )
                 return InputProcessResponse(
                     status=InputProcessStatus.NEW_FRAME,
                     frame_id=hlss_frame_id,
                     message="Input processed",
+                    top_strip_id=top_strip_id,
+                    bottom_strip_id=bottom_strip_id,
                 )
             if hlss_status == InputProcessStatus.NO_CHANGE.value:
                 return InputProcessResponse(
@@ -437,10 +556,13 @@ async def submit_input(
     db.refresh(device)
     current_frame_id = cast(Optional[str], device.current_frame_id)
     if current_frame_id and current_frame_id != previous_frame_id:
+        top_strip_id, bottom_strip_id = _strip_ids_for_frame(db, current_frame_id)
         return InputProcessResponse(
             status=InputProcessStatus.NEW_FRAME,
             frame_id=current_frame_id,
             message="Input processed",
+            top_strip_id=top_strip_id,
+            bottom_strip_id=bottom_strip_id,
         )
 
     if active_instance_id:

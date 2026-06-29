@@ -83,6 +83,16 @@ class DeviceStateResponse(BaseModel):
     poll_after_ms: Optional[int] = Field(
         default=None, description="Hint for next poll interval"
     )
+    top_strip_id: Optional[str] = Field(
+        default=None,
+        description="Content-hash id for the pressed-state top strip of "
+                    "the current frame; fetch via GET /devices/{id}/strips/{strip_id}.",
+    )
+    bottom_strip_id: Optional[str] = Field(
+        default=None,
+        description="Content-hash id for the pressed-state bottom strip "
+                    "of the current frame.",
+    )
 
 
 # Input Models
@@ -99,6 +109,16 @@ class InputProcessResponse(BaseModel):
         default=None, description="Suggested polling delay in milliseconds"
     )
     message: Optional[str] = None
+    top_strip_id: Optional[str] = Field(
+        default=None,
+        description="Content-hash id for the pressed-state top strip of "
+                    "the resulting frame.",
+    )
+    bottom_strip_id: Optional[str] = Field(
+        default=None,
+        description="Content-hash id for the pressed-state bottom strip "
+                    "of the resulting frame.",
+    )
 
 
 # Instance Models

@@ -247,6 +247,14 @@ class Frame(Base):
     width = Column(Integer, nullable=True)
     height = Column(Integer, nullable=True)
 
+    # Optional content-addressed pressed-state strips associated with this
+    # frame. Each id is the SHA256 (truncated to 32 hex chars) of the strip
+    # bytes — same value the device sees in DeviceStateResponse and used to
+    # fetch from GET /devices/{id}/strips/{strip_id}. Multiple frames can
+    # reference the same strip id (visually identical buttons across frames).
+    top_strip_id = Column(String(32), nullable=True, index=True)
+    bottom_strip_id = Column(String(32), nullable=True, index=True)
+
     # Timestamps
     created_at = Column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
@@ -254,6 +262,28 @@ class Frame(Base):
 
     # Relationships
     instance = relationship("Instance", back_populates="frames")
+
+
+class Strip(Base):
+    """Content-addressed pressed-state button strip.
+
+    HLSS uploads `top_pressed` / `bottom_pressed` PNG parts with each frame.
+    LLSS computes their content hash (SHA256 truncated to 32 hex chars), keeps
+    one row per unique strip, and serves it back to the device on
+    GET /devices/{device_id}/strips/{strip_id}. The device caches strips by
+    id and only fetches an id it has not seen before.
+    """
+
+    __tablename__ = "strips"
+    __table_args__ = {"schema": SCHEMA}
+
+    strip_id = Column(String(32), primary_key=True)
+    data = Column(LargeBinary, nullable=False)
+    width = Column(Integer, nullable=True)
+    height = Column(Integer, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class DeviceInstanceMap(Base):

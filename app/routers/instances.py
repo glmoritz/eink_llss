@@ -5,13 +5,14 @@ Instance routes - HLSS instances managed by LLSS
 import hashlib
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 
-from fastapi import APIRouter, Depends, UploadFile
+from fastapi import APIRouter, Depends, File, UploadFile
 from sqlalchemy.orm import Session
 
 from auth import create_instance_access_token
 from database import get_db
-from db_models import Device, Frame, Instance as InstanceModel
+from db_models import Device, Frame, Instance as InstanceModel, Strip
 from dependencies import get_current_instance, get_llss_admin
 from models import (
     FrameCreateResponse,
@@ -19,6 +20,23 @@ from models import (
     Instance,
     InstanceCreate,
 )
+
+
+async def _ingest_strip(
+    db: Session, upload: Optional[UploadFile]
+) -> Optional[str]:
+    """Compute a stable content-hash id for an uploaded strip part, store the
+    bytes once (deduped by id), and return the id. Returns None when the
+    caller did not send the part."""
+    if upload is None:
+        return None
+    content = await upload.read()
+    if not content:
+        return None
+    strip_id = hashlib.sha256(content).hexdigest()[:32]
+    if db.query(Strip).filter(Strip.strip_id == strip_id).first() is None:
+        db.add(Strip(strip_id=strip_id, data=content))
+    return strip_id
 
 router = APIRouter(prefix="/instances", tags=["Instances"])
 
@@ -66,34 +84,52 @@ async def create_instance(
 async def submit_frame(
     instance_id: str,
     file: UploadFile,
+    top_pressed: Optional[UploadFile] = File(default=None),
+    bottom_pressed: Optional[UploadFile] = File(default=None),
     _: str = Depends(get_current_instance),
     db: Session = Depends(get_db),
 ) -> FrameCreateResponse:
     """
     Submit a new logical frame.
 
-    HLSS submits a newly rendered frame (PNG).
-    LLSS stores, diffs, and schedules device refreshes.
+    HLSS submits a newly rendered frame (PNG) plus optional pressed-state
+    button strips (top_pressed / bottom_pressed). LLSS stores them, diffs
+    the frame, and schedules device refreshes. Strips are content-addressed
+    and reused across frames with visually-identical buttons.
     """
     content = await file.read()
     frame_hash = hashlib.sha256(content).hexdigest()[:16]
 
-    # Dedup: if this instance already has a frame with identical content, reuse
-    # it instead of minting a new id. HLSS re-submits on every poll even when the
-    # rendered screen is unchanged; without this each submit created a new
-    # frame_id and bumped current_frame_id, so the device re-fetched and
-    # re-displayed the same image forever (and the frames table grew unbounded).
+    # Compute strip ids up front so the dedup path can compare them. Strip
+    # rows are inserted lazily — duplicates are detected by primary-key
+    # lookup before insert. Empty parts produce None and skip both storage
+    # and the device-side advertisement.
+    top_strip_id = await _ingest_strip(db, top_pressed)
+    bottom_strip_id = await _ingest_strip(db, bottom_pressed)
+
+    # Dedup: if this instance already has a frame with identical content AND
+    # the same strip ids, reuse it. The strip ids participate in the key so
+    # that HLSS swapping out the pressed-state visual (e.g. shifting the
+    # disabled-button style) bumps to a fresh frame_id and lets the device
+    # repaint. Without strip ids in the key, an updated strip would never
+    # reach the device.
     existing = (
         db.query(Frame)
-        .filter(Frame.instance_id == instance_id, Frame.hash == frame_hash)
+        .filter(
+            Frame.instance_id == instance_id,
+            Frame.hash == frame_hash,
+            Frame.top_strip_id == top_strip_id,
+            Frame.bottom_strip_id == bottom_strip_id,
+        )
         .order_by(Frame.created_at.desc())
         .first()
     )
 
     if existing:
+        # Flush any new Strip rows _ingest_strip queued — even on the reuse
+        # path they need to land so the device can fetch by id.
+        db.commit()
         frame_id = existing.frame_id
-        # Point devices at it only if they aren't already — never re-bump to a
-        # new id for identical content (that is what triggered re-display).
         devices = (
             db.query(Device).filter(Device.active_instance_id == instance_id).all()
         )
@@ -119,6 +155,8 @@ async def submit_frame(
         instance_id=instance_id,
         data=content,
         hash=frame_hash,
+        top_strip_id=top_strip_id,
+        bottom_strip_id=bottom_strip_id,
         created_at=created_at,
     )
     db.add(frame)
