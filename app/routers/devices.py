@@ -46,22 +46,34 @@ def _get_llss_base_url() -> str:
     return os.getenv("LLSS_BASE_URL", "http://localhost:8000")
 
 
-def _strip_ids_for_frame(
+def _frame_press_metadata(
     db: Session, frame_id: Optional[str]
-) -> tuple[Optional[str], Optional[str]]:
-    """Look up the pressed-strip ids HLSS uploaded with a given frame.
-    Returned to the device alongside any FETCH_FRAME / NEW_FRAME action so
-    it can populate the press-feedback cache without an extra round trip."""
+) -> tuple[Optional[str], Optional[str], Optional[int], Optional[int]]:
+    """Look up the pressed-feedback metadata HLSS uploaded with a given
+    frame: (top_strip_id, bottom_strip_id, top_enabled_mask,
+    bottom_enabled_mask). All four ride alongside FETCH_FRAME /
+    NEW_FRAME responses so the device can populate its press-feedback
+    cache and gate disabled slots without an extra round trip."""
     if not frame_id:
-        return None, None
+        return None, None, None, None
     frame = (
-        db.query(Frame.top_strip_id, Frame.bottom_strip_id)
+        db.query(
+            Frame.top_strip_id,
+            Frame.bottom_strip_id,
+            Frame.top_enabled_mask,
+            Frame.bottom_enabled_mask,
+        )
         .filter(Frame.frame_id == frame_id)
         .first()
     )
     if not frame:
-        return None, None
-    return frame.top_strip_id, frame.bottom_strip_id
+        return None, None, None, None
+    return (
+        frame.top_strip_id,
+        frame.bottom_strip_id,
+        frame.top_enabled_mask,
+        frame.bottom_enabled_mask,
+    )
 
 
 @router.post(
@@ -160,41 +172,47 @@ async def get_device_state(
 
     # Check if there's a new frame already cached
     if current_frame_id and current_frame_id != last_frame_id:
-        top_strip_id, bottom_strip_id = _strip_ids_for_frame(db, current_frame_id)
+        t_id, b_id, t_mask, b_mask = _frame_press_metadata(db, current_frame_id)
         return DeviceStateResponse(
             action=DeviceAction.FETCH_FRAME,
             frame_id=current_frame_id,
             active_instance_id=active_instance_id,
             poll_after_ms=5000,
-            top_strip_id=top_strip_id,
-            bottom_strip_id=bottom_strip_id,
+            top_strip_id=t_id,
+            bottom_strip_id=b_id,
+            top_enabled_mask=t_mask,
+            bottom_enabled_mask=b_mask,
         )
 
     # Check HLSS for new frames if device has an active instance
     if active_instance_id:
         new_frame_id = await _check_hlss_for_new_frame(db, device, active_instance_id)
         if new_frame_id and new_frame_id != last_frame_id:
-            top_strip_id, bottom_strip_id = _strip_ids_for_frame(db, new_frame_id)
+            t_id, b_id, t_mask, b_mask = _frame_press_metadata(db, new_frame_id)
             return DeviceStateResponse(
                 action=DeviceAction.FETCH_FRAME,
                 frame_id=new_frame_id,
                 active_instance_id=active_instance_id,
                 poll_after_ms=5000,
-                top_strip_id=top_strip_id,
-                bottom_strip_id=bottom_strip_id,
+                top_strip_id=t_id,
+                bottom_strip_id=b_id,
+                top_enabled_mask=t_mask,
+                bottom_enabled_mask=b_mask,
             )
 
     # NOOP: still advertise the strip ids of the frame the device already
     # holds so a device that booted before strips landed can populate its
     # cache on the next heartbeat.
-    top_strip_id, bottom_strip_id = _strip_ids_for_frame(db, last_frame_id)
+    t_id, b_id, t_mask, b_mask = _frame_press_metadata(db, last_frame_id)
     return DeviceStateResponse(
         action=DeviceAction.NOOP,
         frame_id=None,
         active_instance_id=active_instance_id,
         poll_after_ms=5000,
-        top_strip_id=top_strip_id,
-        bottom_strip_id=bottom_strip_id,
+        top_strip_id=t_id,
+        bottom_strip_id=b_id,
+        top_enabled_mask=t_mask,
+        bottom_enabled_mask=b_mask,
     )
 
 
@@ -500,15 +518,17 @@ async def submit_input(
             db.commit()
             current_frame_id = cast(Optional[str], device.current_frame_id)
             if current_frame_id and current_frame_id != previous_frame_id:
-                top_strip_id, bottom_strip_id = _strip_ids_for_frame(
+                t_id, b_id, t_mask, b_mask = _frame_press_metadata(
                     db, current_frame_id
                 )
                 return InputProcessResponse(
                     status=InputProcessStatus.NEW_FRAME,
                     frame_id=current_frame_id,
                     message="Screen switch processed",
-                    top_strip_id=top_strip_id,
-                    bottom_strip_id=bottom_strip_id,
+                    top_strip_id=t_id,
+                    bottom_strip_id=b_id,
+                    top_enabled_mask=t_mask,
+                    bottom_enabled_mask=b_mask,
                 )
             return InputProcessResponse(
                 status=InputProcessStatus.NO_CHANGE,
@@ -535,15 +555,17 @@ async def submit_input(
             hlss_status = hlss_resp.get("status")
             hlss_frame_id = hlss_resp.get("frame_id")
             if hlss_status == InputProcessStatus.NEW_FRAME.value and hlss_frame_id:
-                top_strip_id, bottom_strip_id = _strip_ids_for_frame(
+                t_id, b_id, t_mask, b_mask = _frame_press_metadata(
                     db, hlss_frame_id
                 )
                 return InputProcessResponse(
                     status=InputProcessStatus.NEW_FRAME,
                     frame_id=hlss_frame_id,
                     message="Input processed",
-                    top_strip_id=top_strip_id,
-                    bottom_strip_id=bottom_strip_id,
+                    top_strip_id=t_id,
+                    bottom_strip_id=b_id,
+                    top_enabled_mask=t_mask,
+                    bottom_enabled_mask=b_mask,
                 )
             if hlss_status == InputProcessStatus.NO_CHANGE.value:
                 return InputProcessResponse(
@@ -556,13 +578,15 @@ async def submit_input(
     db.refresh(device)
     current_frame_id = cast(Optional[str], device.current_frame_id)
     if current_frame_id and current_frame_id != previous_frame_id:
-        top_strip_id, bottom_strip_id = _strip_ids_for_frame(db, current_frame_id)
+        t_id, b_id, t_mask, b_mask = _frame_press_metadata(db, current_frame_id)
         return InputProcessResponse(
             status=InputProcessStatus.NEW_FRAME,
             frame_id=current_frame_id,
             message="Input processed",
-            top_strip_id=top_strip_id,
-            bottom_strip_id=bottom_strip_id,
+            top_strip_id=t_id,
+            bottom_strip_id=b_id,
+            top_enabled_mask=t_mask,
+            bottom_enabled_mask=b_mask,
         )
 
     if active_instance_id:

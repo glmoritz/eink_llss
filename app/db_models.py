@@ -255,6 +255,15 @@ class Frame(Base):
     top_strip_id = Column(String(32), nullable=True, index=True)
     bottom_strip_id = Column(String(32), nullable=True, index=True)
 
+    # Bit S set = slot S is pressable on this frame. Independent of the
+    # strip image so the device can skip press feedback on a disabled slot
+    # (avoids the "press an empty slot, get a black square" bug); also lets
+    # HLSS reuse the same strip across frames where the rendered buttons
+    # are identical but their enabled set differs. NULL when HLSS did not
+    # send a mask (device falls back to an all-white-slot heuristic).
+    top_enabled_mask = Column(Integer, nullable=True)
+    bottom_enabled_mask = Column(Integer, nullable=True)
+
     # Timestamps
     created_at = Column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

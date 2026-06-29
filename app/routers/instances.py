@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from sqlalchemy.orm import Session
 
 from auth import create_instance_access_token
@@ -86,6 +86,8 @@ async def submit_frame(
     file: UploadFile,
     top_pressed: Optional[UploadFile] = File(default=None),
     bottom_pressed: Optional[UploadFile] = File(default=None),
+    top_enabled_mask: Optional[int] = Form(default=None, ge=0, le=255),
+    bottom_enabled_mask: Optional[int] = Form(default=None, ge=0, le=255),
     _: str = Depends(get_current_instance),
     db: Session = Depends(get_db),
 ) -> FrameCreateResponse:
@@ -108,11 +110,10 @@ async def submit_frame(
     bottom_strip_id = await _ingest_strip(db, bottom_pressed)
 
     # Dedup: if this instance already has a frame with identical content AND
-    # the same strip ids, reuse it. The strip ids participate in the key so
-    # that HLSS swapping out the pressed-state visual (e.g. shifting the
-    # disabled-button style) bumps to a fresh frame_id and lets the device
-    # repaint. Without strip ids in the key, an updated strip would never
-    # reach the device.
+    # the same strip ids AND the same enabled-mask, reuse it. All of those
+    # participate in the key so that HLSS toggling a button's pressable
+    # state (without changing labels) still mints a fresh frame_id and the
+    # device sees the updated mask in /state.
     existing = (
         db.query(Frame)
         .filter(
@@ -120,6 +121,8 @@ async def submit_frame(
             Frame.hash == frame_hash,
             Frame.top_strip_id == top_strip_id,
             Frame.bottom_strip_id == bottom_strip_id,
+            Frame.top_enabled_mask == top_enabled_mask,
+            Frame.bottom_enabled_mask == bottom_enabled_mask,
         )
         .order_by(Frame.created_at.desc())
         .first()
@@ -157,6 +160,8 @@ async def submit_frame(
         hash=frame_hash,
         top_strip_id=top_strip_id,
         bottom_strip_id=bottom_strip_id,
+        top_enabled_mask=top_enabled_mask,
+        bottom_enabled_mask=bottom_enabled_mask,
         created_at=created_at,
     )
     db.add(frame)

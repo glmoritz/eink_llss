@@ -93,6 +93,17 @@ class DeviceStateResponse(BaseModel):
         description="Content-hash id for the pressed-state bottom strip "
                     "of the current frame.",
     )
+    top_enabled_mask: Optional[int] = Field(
+        default=None, ge=0, le=255,
+        description="8-bit mask of pressable slots in the top strip "
+                    "(bit S = slot S enabled). Null when HLSS did not "
+                    "advertise one — device falls back to a local "
+                    "all-white-slot heuristic.",
+    )
+    bottom_enabled_mask: Optional[int] = Field(
+        default=None, ge=0, le=255,
+        description="8-bit mask of pressable slots in the bottom strip.",
+    )
 
 
 # Input Models
@@ -118,6 +129,14 @@ class InputProcessResponse(BaseModel):
         default=None,
         description="Content-hash id for the pressed-state bottom strip "
                     "of the resulting frame.",
+    )
+    top_enabled_mask: Optional[int] = Field(
+        default=None, ge=0, le=255,
+        description="8-bit mask of pressable slots in the top strip.",
+    )
+    bottom_enabled_mask: Optional[int] = Field(
+        default=None, ge=0, le=255,
+        description="8-bit mask of pressable slots in the bottom strip.",
     )
 
 
