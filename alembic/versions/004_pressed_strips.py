@@ -37,36 +37,36 @@ def upgrade() -> None:
             sa.DateTime(timezone=True),
             server_default=sa.func.now(),
         ),
-        schema="eink",
+        schema="eink_llss",
     )
 
     op.add_column(
         "frames",
         sa.Column("top_strip_id", sa.String(length=32), nullable=True),
-        schema="eink",
+        schema="eink_llss",
     )
     op.add_column(
         "frames",
         sa.Column("bottom_strip_id", sa.String(length=32), nullable=True),
-        schema="eink",
+        schema="eink_llss",
     )
     op.create_index(
         "ix_frames_top_strip_id",
         "frames",
         ["top_strip_id"],
-        schema="eink",
+        schema="eink_llss",
     )
     op.create_index(
         "ix_frames_bottom_strip_id",
         "frames",
         ["bottom_strip_id"],
-        schema="eink",
+        schema="eink_llss",
     )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_frames_bottom_strip_id", table_name="frames", schema="eink")
-    op.drop_index("ix_frames_top_strip_id", table_name="frames", schema="eink")
-    op.drop_column("frames", "bottom_strip_id", schema="eink")
-    op.drop_column("frames", "top_strip_id", schema="eink")
-    op.drop_table("strips", schema="eink")
+    op.drop_index("ix_frames_bottom_strip_id", table_name="frames", schema="eink_llss")
+    op.drop_index("ix_frames_top_strip_id", table_name="frames", schema="eink_llss")
+    op.drop_column("frames", "bottom_strip_id", schema="eink_llss")
+    op.drop_column("frames", "top_strip_id", schema="eink_llss")
+    op.drop_table("strips", schema="eink_llss")
