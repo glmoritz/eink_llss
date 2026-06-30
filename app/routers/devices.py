@@ -511,9 +511,23 @@ async def submit_input(
     )
     db.add(input_event)
 
-    # Handle screen switching with HL_LEFT and HL_RIGHT on long press only
-    if event.button in (ButtonType.HL_LEFT, ButtonType.HL_RIGHT):
-        if event.event_type == EventType.LONG_PRESS:
+    # Instance-switching on HL_LEFT/HL_RIGHT LONG_PRESS is only useful
+    # when the device has more than one assigned instance to cycle
+    # through. With a single assignment the cycle is a no-op AND the
+    # press never reaches HLSS — which means app-level handlers (e.g.
+    # the PLAY screen's view toggle) silently swallow the press. Skip
+    # the LLSS-side switch in the single-instance case and let the event
+    # forward normally to HLSS.
+    if (
+        event.button in (ButtonType.HL_LEFT, ButtonType.HL_RIGHT)
+        and event.event_type == EventType.LONG_PRESS
+    ):
+        assigned_count = (
+            db.query(DeviceInstanceMap)
+            .filter(DeviceInstanceMap.device_id == device.device_id)
+            .count()
+        )
+        if assigned_count > 1:
             await _handle_screen_switch(db, device, event.button)
             db.commit()
             current_frame_id = cast(Optional[str], device.current_frame_id)
