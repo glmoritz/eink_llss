@@ -264,6 +264,12 @@ class Frame(Base):
     top_enabled_mask = Column(Integer, nullable=True)
     bottom_enabled_mask = Column(Integer, nullable=True)
 
+    # Server-side hint: when True, device drives a full e-ink refresh
+    # (UI_CTX_SWITCH) on this frame instead of partial. HLSS sets this
+    # for view-mode toggles and frames where the board changed — both
+    # paths produce a lot of ghosting on partial refresh.
+    full_refresh = Column(Boolean, nullable=False, server_default="false")
+
     # Timestamps
     created_at = Column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

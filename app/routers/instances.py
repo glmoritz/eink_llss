@@ -88,6 +88,7 @@ async def submit_frame(
     bottom_pressed: Optional[UploadFile] = File(default=None),
     top_enabled_mask: Optional[int] = Form(default=None, ge=0, le=255),
     bottom_enabled_mask: Optional[int] = Form(default=None, ge=0, le=255),
+    full_refresh: bool = Form(default=False),
     _: str = Depends(get_current_instance),
     db: Session = Depends(get_db),
 ) -> FrameCreateResponse:
@@ -132,6 +133,14 @@ async def submit_frame(
         # Flush any new Strip rows _ingest_strip queued — even on the reuse
         # path they need to land so the device can fetch by id.
         db.commit()
+        # Promote full_refresh on the existing row if the new submit wants
+        # it: re-rendering an unchanged image after a real state change
+        # (e.g. opponent move that ended up identical visually) should
+        # still cause the device to clear ghosting next time it picks
+        # this frame_id up.
+        if full_refresh and not existing.full_refresh:
+            existing.full_refresh = True
+            db.commit()
         frame_id = existing.frame_id
         devices = (
             db.query(Device).filter(Device.active_instance_id == instance_id).all()
@@ -162,6 +171,7 @@ async def submit_frame(
         bottom_strip_id=bottom_strip_id,
         top_enabled_mask=top_enabled_mask,
         bottom_enabled_mask=bottom_enabled_mask,
+        full_refresh=full_refresh,
         created_at=created_at,
     )
     db.add(frame)

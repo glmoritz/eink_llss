@@ -104,6 +104,12 @@ class DeviceStateResponse(BaseModel):
         default=None, ge=0, le=255,
         description="8-bit mask of pressable slots in the bottom strip.",
     )
+    full_refresh: Optional[bool] = Field(
+        default=None,
+        description="When true, device should drive a full e-ink refresh "
+                    "(UI_CTX_SWITCH) on this frame instead of partial. "
+                    "Null/false means partial — the default cadence.",
+    )
 
 
 # Input Models
@@ -137,6 +143,10 @@ class InputProcessResponse(BaseModel):
     bottom_enabled_mask: Optional[int] = Field(
         default=None, ge=0, le=255,
         description="8-bit mask of pressable slots in the bottom strip.",
+    )
+    full_refresh: Optional[bool] = Field(
+        default=None,
+        description="Full e-ink refresh hint for the resulting frame.",
     )
 
 
