@@ -585,6 +585,7 @@ async def submit_input(
                     status=InputProcessStatus.NEW_FRAME,
                     frame_id=hlss_frame_id,
                     message="Input processed",
+                    notice=hlss_resp.get("notice"),
                     top_strip_id=t_id,
                     bottom_strip_id=b_id,
                     top_enabled_mask=t_mask,
@@ -594,6 +595,7 @@ async def submit_input(
                 return InputProcessResponse(
                     status=InputProcessStatus.NO_CHANGE,
                     message="Input processed; no change",
+                    notice=hlss_resp.get("notice"),
                 )
 
     # Fallback: detect a frame committed via the frame-submit callback

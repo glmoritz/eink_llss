@@ -126,6 +126,12 @@ class InputProcessResponse(BaseModel):
         default=None, description="Suggested polling delay in milliseconds"
     )
     message: Optional[str] = None
+    notice: Optional[str] = Field(
+        default=None,
+        description="User-facing transient popup text for the device to flash "
+                    "for a couple of seconds. Propagated verbatim from the HLSS "
+                    "backend; distinct from the debug-only `message` field.",
+    )
     top_strip_id: Optional[str] = Field(
         default=None,
         description="Content-hash id for the pressed-state top strip of "
